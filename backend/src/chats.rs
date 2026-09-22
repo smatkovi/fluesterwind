@@ -62,6 +62,9 @@ pub struct Chat {
     pub last_time: u64,
     #[serde(rename = "fromMe")]
     pub from_me: bool,
+    /// Pfad zum Profilbild, sofern eines geholt wurde. Leer sonst -- die
+    /// Oberflaeche zeigt dann einen Kreis mit dem Anfangsbuchstaben.
+    pub avatar: String,
 }
 
 /// Ein Mitglied einer Gruppe.
@@ -121,6 +124,12 @@ pub struct Schnappschuss {
     /// Gruppenkennung -> Mitglieder. Beim Aufbau abgelegt, damit die
     /// Abfrage aus der Oberflaeche nicht ueber den Signal-Faden muss.
     mitglieder: HashMap<String, Vec<Mitglied>>,
+    /// Kennung -> Profilschluessel. Ohne ihn gibt Signal kein Profilbild
+    /// heraus, und die Kontaktsynchronisierung vom Hauptgeraet liefert
+    /// ihn nicht mit -- im Feld hatten 95 von 96 Kontakten keinen.
+    /// Gruppenmitglieder tragen ihren dagegen bei sich, und wer in einer
+    /// gemeinsamen Gruppe ist, kommt so doch zu einem Bild.
+    profilschluessel: HashMap<String, Vec<u8>>,
     /// Zaehlt jede Aenderung. Die Oberflaeche haengt daran statt zu pollen
     /// -- dasselbe Verfahren wie beim WhatsApp-Backend.
     pub folge: u64,
@@ -143,6 +152,7 @@ impl Schnappschuss {
             last_message: String::new(),
             last_time: 0,
             from_me: false,
+            avatar: String::new(),
         });
         if !chatname.is_empty() {
             chat.name = chatname.to_string();
@@ -187,6 +197,16 @@ impl Schnappschuss {
         self.namen = namen;
     }
 
+    pub fn profilschluessel_setzen(&mut self, kennung: &str, schluessel: Vec<u8>) {
+        if schluessel.len() == 32 {
+            self.profilschluessel.insert(kennung.to_string(), schluessel);
+        }
+    }
+
+    pub fn profilschluessel(&self, kennung: &str) -> Option<Vec<u8>> {
+        self.profilschluessel.get(kennung).cloned()
+    }
+
     pub fn mitglieder_setzen(&mut self, jid: &str, liste: Vec<Mitglied>) {
         self.mitglieder.insert(jid.to_string(), liste);
     }
@@ -208,6 +228,25 @@ impl Schnappschuss {
             .get(kennung)
             .cloned()
             .unwrap_or_else(|| kennung.to_string())
+    }
+
+    /// Vermerkt, wo das Profilbild eines Chats liegt.
+    pub fn avatar_setzen(&mut self, jid: &str, pfad: &str) {
+        if let Some(c) = self.chats.get_mut(jid) {
+            if c.avatar != pfad {
+                c.avatar = pfad.to_string();
+                self.folge += 1;
+            }
+        }
+    }
+
+    /// Die Chats, zu denen noch kein Bild vorliegt.
+    pub fn ohne_avatar(&self) -> Vec<String> {
+        self.chats
+            .values()
+            .filter(|c| c.avatar.is_empty())
+            .map(|c| c.jid.clone())
+            .collect()
     }
 
     pub fn chatname_setzen(&mut self, jid: &str, name: &str) {
@@ -252,6 +291,7 @@ impl Schnappschuss {
                 last_message: String::new(),
                 last_time: 0,
                 from_me: false,
+                avatar: String::new(),
             },
         );
         self.folge += 1;

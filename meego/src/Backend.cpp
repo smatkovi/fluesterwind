@@ -466,3 +466,20 @@ QString Backend::groesse(const QVariant &bytes) const
         return QString::number(b / 1024.0, 'f', 1) + QLatin1String(" kB");
     return QString::number(b / (1024.0 * 1024.0), 'f', 1) + QLatin1String(" MB");
 }
+
+void Backend::abmelden()
+{
+    QNetworkReply *r = hole(QLatin1String("/logout"));
+    connect(r, SIGNAL(finished()), this, SLOT(befehlFertig()));
+    // Der Dienst beendet sich danach; der naechste Start findet ein
+    // leeres Datenverzeichnis vor.
+    m_verknuepft = false;
+    m_verbunden = false;
+    m_chats.clear();
+    m_nachrichten.clear();
+    m_offenerChat.clear();
+    m_zustand = QLatin1String("abgemeldet");
+    emit statusChanged();
+    emit chatsChanged();
+    emit nachrichtenChanged();
+}

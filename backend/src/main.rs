@@ -32,6 +32,7 @@ use presage_store_sqlite::{OnNewIdentity, SqliteStore};
 use tokio::sync::mpsc;
 
 mod chats;
+mod dbusname;
 mod http;
 mod medien;
 mod sperre;
@@ -60,6 +61,10 @@ pub enum Befehl {
     /// herunterladen.
     MedienLaden { chat: String, id: String },
     DateiSenden { an: String, pfad: String, beschriftung: String },
+    /// Lokal abmelden: Anmeldedaten und Datenbank loeschen. Vom Konto
+    /// nehmen kann sich ein Zweitgeraet nicht selbst -- das geht nur am
+    /// Hauptgeraet.
+    Abmelden,
 }
 
 pub type GeteilteLage = Arc<Mutex<Lage>>;
@@ -90,7 +95,9 @@ fn main() {
         .expect("Laufzeit");
     let lokal = tokio::task::LocalSet::new();
 
+    let verzeichnis_fuer_block = verzeichnis.clone();
     laufzeit.block_on(lokal.run_until(async move {
+        let verzeichnis = verzeichnis_fuer_block;
         // sqlite:// erwartet einen Pfad; mode=rwc legt die Datei an, wenn
         // sie fehlt.
         let db = format!("sqlite://{}/signal.db?mode=rwc", verzeichnis.display());
@@ -101,6 +108,10 @@ fn main() {
                 std::process::exit(1);
             }
         };
+
+        // Vor allem Netzkram: den Dienstnamen holen, damit eine
+        // D-Bus-Aktivierung als gelungen gilt.
+        dbusname::beanspruchen().await;
 
         let lage: GeteilteLage = Arc::new(Mutex::new(Lage::neu()));
         let chats: GeteilteChats = Arc::new(Mutex::new(Schnappschuss::default()));
@@ -170,6 +181,11 @@ fn main() {
                         if let Ok(mut l) = lage.lock() {
                             l.fehler_setzen(e);
                         }
+                    }
+                }
+                Befehl::Abmelden => {
+                    if let Some(m) = manager.as_mut() {
+                        abmelden(m, &verzeichnis).await;
                     }
                 }
                 Befehl::DateiSenden { an, pfad, beschriftung } => {
@@ -365,6 +381,21 @@ async fn verarbeiten(
     let titel = manager.thread_title(&thread).await.unwrap_or_default();
     let eigene = manager.registration_data().service_ids.aci;
 
+    // Jede Nachricht traegt den Profilschluessel ihres Absenders bei
+    // sich. Das ist nach den Gruppenmitgliedern die zweite Quelle dafuer
+    // -- und fuer jemanden, mit dem man keine Gruppe teilt, die einzige.
+    // Ohne den Schluessel gibt Signal kein Profilbild heraus.
+    if let presage::libsignal_service::content::ContentBody::DataMessage(d) = &inhalt.body {
+        if let Some(pk) = &d.profile_key {
+            if let Ok(mut c) = chats.lock() {
+                c.profilschluessel_setzen(
+                    &inhalt.metadata.sender.service_id_string(),
+                    pk.clone(),
+                );
+            }
+        }
+    }
+
     // Derselbe Bauer wie beim Lesen aus dem Speicher -- zwei Fassungen
     // davon waeren zwei Gelegenheiten, sie auseinanderlaufen zu lassen.
     let Some(n) = nachricht_aus(&inhalt, &jid, eigene) else {
@@ -405,18 +436,23 @@ async fn senden(
     if chats::ist_gruppe(an) {
         let schluessel = chats::gruppenschluessel(an)
             .ok_or_else(|| "Gruppenkennung unlesbar".to_string())?;
+        println!("➡ an Gruppe {} ({} Byte Schluessel)", &an[..14.min(an.len())],
+                 schluessel.len());
         manager
             .send_message_to_group(&schluessel, ContentBody::DataMessage(nachricht), zeit)
             .await
             .map_err(|e| e.to_string())?;
+        println!("➡ Gruppennachricht abgeschickt");
     } else {
         let roh = an.strip_prefix("c:").unwrap_or(an);
         let ziel = ServiceId::parse_from_service_id_string(roh)
             .ok_or_else(|| format!("Kennung unlesbar: {roh}"))?;
+        println!("➡ an {}", &roh[..12.min(roh.len())]);
         manager
             .send_message(ziel, ContentBody::DataMessage(nachricht), zeit)
             .await
             .map_err(|e| e.to_string())?;
+        println!("➡ abgeschickt");
     }
 
     // Die eigene Nachricht gleich zeigen, statt auf ihre Rueckmeldung zu
@@ -477,10 +513,13 @@ async fn schnappschuss_fuellen(
     if let Ok(mut s) = chats.lock() {
         s.namen_setzen(namen.clone());
     }
+    // Profilschluessel, eingesammelt aus den Gruppen.
+    let mut schluessel: Vec<(String, Vec<u8>)> = Vec::new();
+
     match manager.store().groups().await {
         Ok(liste) => {
-            for (schluessel, g) in liste.flatten() {
-                let jid = chats::kennung_gruppe(&schluessel);
+            for (schluessel_bytes, g) in liste.flatten() {
+                let jid = chats::kennung_gruppe(&schluessel_bytes);
                 // Die Mitglieder gleich mit ablegen: die Gruppendaten
                 // liegen ohnehin gerade offen, und die Oberflaeche kommt
                 // an den Signal-Faden nicht heran.
@@ -489,6 +528,12 @@ async fn schnappschuss_fuellen(
                     .iter()
                     .map(|m| {
                         let kennung = ServiceId::from(m.aci).service_id_string();
+                        // Der Profilschluessel dieses Mitglieds ist oft
+                        // der einzige, den wir zu dieser Person haben.
+                        schluessel.push((
+                            kennung.clone(),
+                            m.profile_key.get_bytes().to_vec(),
+                        ));
                         chats::Mitglied {
                             name: namen
                                 .get(&kennung)
@@ -508,13 +553,19 @@ async fn schnappschuss_fuellen(
                 if let Ok(mut c) = chats.lock() {
                     c.mitglieder_setzen(&jid, mitglieder);
                 }
-                faeden.push((Thread::Group(schluessel), g.title));
+                faeden.push((Thread::Group(schluessel_bytes), g.title));
             }
         }
         Err(e) => eprintln!("Gruppen nicht lesbar: {e}"),
     }
 
-    println!("📇 {} Unterhaltungen im Speicher", faeden.len());
+    if let Ok(mut c) = chats.lock() {
+        for (kennung, k) in &schluessel {
+            c.profilschluessel_setzen(kennung, k.clone());
+        }
+    }
+    println!("📇 {} Unterhaltungen im Speicher, {} Profilschluessel",
+             faeden.len(), schluessel.len());
 
     let eigene = manager.registration_data().service_ids.aci;
     let mut gefunden = 0usize;
@@ -527,6 +578,19 @@ async fn schnappschuss_fuellen(
             Thread::Group(s) => chats::kennung_gruppe(s),
         };
         for inhalt in verlauf.flatten() {
+            // Auch die gespeicherten Nachrichten tragen Schluessel.
+            if let presage::libsignal_service::content::ContentBody::DataMessage(d) =
+                &inhalt.body
+            {
+                if let Some(pk) = &d.profile_key {
+                    if let Ok(mut c) = chats.lock() {
+                        c.profilschluessel_setzen(
+                            &inhalt.metadata.sender.service_id_string(),
+                            pk.clone(),
+                        );
+                    }
+                }
+            }
             if let Some(n) = nachricht_aus(&inhalt, &jid, eigene) {
                 gefunden += 1;
                 if let Ok(mut s) = chats.lock() {
@@ -542,6 +606,7 @@ async fn schnappschuss_fuellen(
         }
     }
     println!("📜 {gefunden} Nachrichten aus dem Speicher");
+    avatare_holen(manager, chats).await;
 }
 
 /// Macht aus einem gespeicherten Inhalt eine Nachricht -- oder nichts,
@@ -718,4 +783,160 @@ async fn datei_senden(
         .map_err(|e| e.to_string())?;
 
     senden(manager, an, beschriftung, Some(zeiger), chats).await
+}
+
+/// Holt die Profilbilder, die noch fehlen.
+///
+/// Nicht alle auf einmal und nicht bei jedem Durchlauf: bei hundert
+/// Kontakten waeren das hundert Abrufe, und auf 2G legt das den Dienst
+/// fuer Minuten lahm. Ein paar je Durchlauf genuegen -- nach wenigen
+/// Runden sind die haeufigen Chats versorgt, und die stehen oben.
+async fn avatare_holen(
+    manager: &mut Manager<SqliteStore, Registered>,
+    chats: &GeteilteChats,
+) {
+    use presage::libsignal_service::protocol::ServiceId;
+    use presage::libsignal_service::zkgroup::profiles::ProfileKey;
+    use presage::store::ContentsStore;
+
+    const JE_DURCHLAUF: usize = 8;
+
+    let offen: Vec<String> = match chats.lock() {
+        Ok(c) => c.ohne_avatar(),
+        Err(_) => return,
+    };
+    if offen.is_empty() {
+        return;
+    }
+
+    let mut geholt = 0usize;
+    let mut ohne_kontakt = 0usize;
+    let mut ohne_schluessel = 0usize;
+    let mut schon_da = 0usize;
+    for jid in offen {
+        if geholt >= JE_DURCHLAUF {
+            break;
+        }
+        // Schon einmal geholt? Dann nur den Pfad nachtragen, nicht das
+        // Netz bemuehen.
+        let pfad = medien::avatar_pfad(&jid);
+        if pfad.exists() {
+            schon_da += 1;
+            // Eine leere Datei heisst "nachgefragt, nichts hinterlegt" --
+            // die darf nicht als Bild eingetragen werden, sonst zeigt die
+            // Oberflaeche ein kaputtes Bild statt des Buchstabenkreises.
+            if std::fs::metadata(&pfad).map(|m| m.len() > 0).unwrap_or(false) {
+                if let Ok(mut c) = chats.lock() {
+                    c.avatar_setzen(&jid, &pfad.to_string_lossy());
+                }
+            }
+            continue;
+        }
+
+        let bild: Option<Vec<u8>> = if chats::ist_gruppe(&jid) {
+            // Gruppenbilder brauchen den Hauptschluessel in einem
+            // GroupContextV2 -- mehr als den kennt retrieve_group_avatar
+            // nicht.
+            let Some(schluessel) = chats::gruppenschluessel(&jid) else {
+                continue;
+            };
+            let kontext = presage::libsignal_service::proto::GroupContextV2 {
+                master_key: Some(schluessel),
+                revision: None,
+                group_change: None,
+            };
+            manager.retrieve_group_avatar(kontext).await.ok().flatten()
+        } else {
+            let roh = jid.strip_prefix("c:").unwrap_or(&jid);
+            let Some(id) = ServiceId::parse_from_service_id_string(roh) else {
+                continue;
+            };
+            // Ohne den Profilschluessel geht es nicht -- er steht im
+            // Kontakt, und ohne Kontakt gibt es kein Bild.
+            let Ok(Some(kontakt)) = manager.store().contact_by_id(&id).await else {
+                ohne_kontakt += 1;
+                continue;
+            };
+            // Erst der Kontakt, dann die Karte aus den Gruppen.
+            let roh_schluessel = if kontakt.profile_key.len() == 32 {
+                Some(kontakt.profile_key.clone())
+            } else {
+                chats.lock().ok().and_then(|c| c.profilschluessel(roh))
+            };
+            let Some(roh_schluessel) = roh_schluessel else {
+                ohne_schluessel += 1;
+                continue;
+            };
+            let Ok(feld) = <[u8; 32]>::try_from(roh_schluessel.as_slice()) else {
+                ohne_schluessel += 1;
+                continue;
+            };
+            manager
+                .retrieve_profile_avatar_by_uuid(
+                    kontakt.uuid,
+                    ProfileKey::create(feld),
+                )
+                .await
+                .ok()
+                .flatten()
+        };
+
+        geholt += 1;
+        let Some(daten) = bild else {
+            // Kein Bild hinterlegt. Eine leere Datei anlegen, damit nicht
+            // bei jedem Durchlauf erneut gefragt wird.
+            let _ = medien::avatar_ablegen(&jid, &[]);
+            continue;
+        };
+        match medien::avatar_ablegen(&jid, &daten) {
+            Ok(p) => {
+                if let Ok(mut c) = chats.lock() {
+                    c.avatar_setzen(&jid, &p.to_string_lossy());
+                }
+            }
+            Err(e) => eprintln!("Profilbild nicht ablegbar: {e}"),
+        }
+    }
+    println!(
+        "🖼 Profilbilder: {geholt} abgefragt, {schon_da} lagen schon vor, \
+         {ohne_kontakt} ohne Kontakt, {ohne_schluessel} ohne Profilschluessel"
+    );
+}
+
+/// Meldet dieses Geraet lokal ab.
+///
+/// Was hier NICHT geht: sich selbst vom Konto nehmen. presage verweigert
+/// unlink_secondary auf einem Zweitgeraet ausdruecklich -- "secondary
+/// devices cannot unlink themselves or other devices, it will fail with an
+/// unauthorized error". Das Entfernen gehoert ans Hauptgeraet, und die
+/// Oberflaeche sagt das auch.
+///
+/// Was geht, ist der lokale Teil: Anmeldedaten und Datenbank loeschen.
+/// Danach beendet sich der Dienst -- eine offene SQLite-Verbindung auf
+/// eine geloeschte Datei ist kein Zustand, in dem man weiterarbeiten
+/// moechte. Der Anstossjob oder die App holen ihn zurueck, dann ohne
+/// Verknuepfung.
+async fn abmelden(
+    manager: &mut Manager<SqliteStore, Registered>,
+    verzeichnis: &std::path::Path,
+) {
+    use presage::store::StateStore;
+
+    println!("👋 Abmelden angefordert");
+    if let Err(e) = manager.store().clone().clear_registration().await {
+        eprintln!("Anmeldedaten nicht geloescht: {e}");
+    }
+    for name in ["signal.db", "signal.db-wal", "signal.db-shm"] {
+        let p = verzeichnis.join(name);
+        if p.exists() {
+            if let Err(e) = std::fs::remove_file(&p) {
+                eprintln!("{}: {e}", p.display());
+            }
+        }
+    }
+    // Auch die Profilbilder: sie gehoeren zu einem Konto, von dem wir uns
+    // gerade trennen.
+    let _ = std::fs::remove_dir_all(verzeichnis.join("avatare"));
+    println!("👋 abgemeldet - Dienst beendet sich");
+    std::process::exit(0);
 }

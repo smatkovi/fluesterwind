@@ -161,3 +161,27 @@ pub fn mime_aus_pfad(pfad: &Path) -> String {
     }
     .to_string()
 }
+
+/// Wohin Profilbilder kommen.
+///
+/// Nicht nach MyDocs: die Galerie soll sich nicht mit hunderten
+/// Kontaktbildern fuellen. Das Datenverzeichnis reicht -- nur die App
+/// selbst liest sie.
+pub fn avatar_pfad(jid: &str) -> PathBuf {
+    let sicher: String = jid
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    heim()
+        .join(".local/share/harbour/fluesterwind/avatare")
+        .join(format!("{sicher}.jpg"))
+}
+
+pub fn avatar_ablegen(jid: &str, daten: &[u8]) -> Result<PathBuf, String> {
+    let pfad = avatar_pfad(jid);
+    if let Some(ordner) = pfad.parent() {
+        std::fs::create_dir_all(ordner).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&pfad, daten).map_err(|e| e.to_string())?;
+    Ok(pfad)
+}

@@ -238,6 +238,12 @@ fn beantworten(
             }
             (200, r#"{"ok":true}"#.into())
         }
+        "/logout" => {
+            if befehle.send(Befehl::Abmelden).is_err() {
+                return (500, r#"{"error":"Signal-Seite antwortet nicht"}"#.into());
+            }
+            (200, r#"{"ok":true}"#.into())
+        }
         "/quit" => {
             println!("👋 Beenden angefordert");
             std::process::exit(0);

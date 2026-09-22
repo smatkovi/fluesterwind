@@ -97,6 +97,9 @@ public:
     // aufrufen koennte, also listet der Dienst und die App zeigt.
     Q_INVOKABLE void verzeichnisLesen(const QString &pfad);
     Q_INVOKABLE void oeffnen(const QString &pfad);
+    // Meldet lokal ab. Vom Konto nehmen kann sich ein Zweitgeraet nicht
+    // selbst -- das geht nur am Hauptgeraet.
+    Q_INVOKABLE void abmelden();
     Q_INVOKABLE QString groesse(const QVariant &bytes) const;
 
 signals:

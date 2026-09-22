@@ -26,6 +26,10 @@ Page {
                 text: "Verknüpfte Geräte (" + Dienst.geraete.length + ")"
                 onClicked: geraeteFenster.open()
             }
+            MenuItem {
+                text: "Abmelden"
+                onClicked: abmeldeFrage.open()
+            }
         }
     }
 
@@ -39,6 +43,23 @@ Page {
                  ? Dienst.geraete.join("\n")
                  : "Noch keine Auskunft vom Server."
         acceptButtonText: "Schließen"
+    }
+
+    QueryDialog {
+        id: abmeldeFrage
+        titleText: "Abmelden"
+        // Ehrlich sagen, was dieser Knopf kann und was nicht: ein
+        // Zweitgerät darf sich bei Signal nicht selbst vom Konto nehmen,
+        // das verweigert der Server.
+        message: "Anmeldedaten und lokale Datenbank werden gelöscht. "
+                 + "Deine Nachrichten auf dem Hauptgerät bleiben unberührt.\n\n"
+                 + "Aus der Liste der verknüpften Geräte entfernt sich dieses "
+                 + "Gerät dabei nicht — das kann nur das Hauptgerät. Dort also "
+                 + "noch „Fluesterwind (N9)" + String.fromCharCode(0x201C)
+                 + " aus den verknüpften Geräten nehmen."
+        acceptButtonText: "Abmelden"
+        rejectButtonText: "Abbrechen"
+        onAccepted: Dienst.abmelden()
     }
 
     Rectangle { anchors.fill: parent; color: "#000000" }
@@ -60,8 +81,20 @@ Page {
                 anchors.verticalCenter: parent.verticalCenter
                 width: 64; height: 64; radius: 32
                 color: Dienst.istGruppe(modelData.jid) ? "#3a5a3a" : "#2a4d6a"
+                // Der Dienst legt geholte Bilder als Datei ab. Fehlt eines,
+                // ist der Kreis mit dem Anfangsbuchstaben besser als ein
+                // Loch -- und der Dienst holt sie nach und nach nach.
+                Image {
+                    anchors.fill: parent
+                    source: modelData.avatar ? "file://" + modelData.avatar : ""
+                    visible: status === Image.Ready
+                    fillMode: Image.PreserveAspectCrop
+                    smooth: true
+                    asynchronous: true
+                }
                 Label {
                     anchors.centerIn: parent
+                    visible: !modelData.avatar
                     text: (modelData.name || "?").substring(0, 1).toUpperCase()
                     font.pixelSize: 28
                 }
