@@ -133,14 +133,16 @@ Page {
             width: parent.width - 16
             spacing: 8
 
-            TextArea {
+            // TextField, nicht TextArea: dessen onAccepted feuert beim
+            // Enter, waehrend eine TextArea die Taste selbst verbraucht
+            // und eine Zeile einfuegt. Mit Keys.onReturnPressed kam die
+            // Nachricht nicht heraus -- der WhatsApp-Port macht es
+            // ebenfalls so, und dort geht es.
+            TextField {
                 id: feld
                 width: parent.width - knopf.width - 8
                 placeholderText: "Nachricht"
-                // Enter schickt ab, statt eine Zeile einzufuegen: auf der
-                // ausziehbaren Tastatur ist das die erwartete Geste.
-                Keys.onReturnPressed: knopf.abschicken()
-                Keys.onEnterPressed: knopf.abschicken()
+                onAccepted: knopf.abschicken()
             }
 
             Button {

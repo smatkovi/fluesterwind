@@ -33,6 +33,8 @@ use tokio::sync::mpsc;
 
 mod chats;
 mod http;
+mod medien;
+mod sperre;
 mod zustand;
 
 use chats::Schnappschuss;
@@ -68,6 +70,13 @@ fn main() {
     if let Err(e) = std::fs::create_dir_all(&verzeichnis) {
         eprintln!("Datenverzeichnis nicht anlegbar: {e}");
         std::process::exit(1);
+    }
+
+    // Vor allem anderen: nur eine Instanz. Zwei Dienste mit derselben
+    // Geraetekennung werfen sich bei Signal gegenseitig vom Websocket.
+    if let Err(e) = sperre::nehmen(&verzeichnis) {
+        eprintln!("↩ {e} - dieser Start endet hier");
+        std::process::exit(0);
     }
 
     let laufzeit = tokio::runtime::Builder::new_current_thread()
@@ -321,36 +330,6 @@ async fn verarbeiten(
         }
     };
 
-    // Nur was Text traegt. Anhaenge kommen spaeter dazu; eine Nachricht
-    // ohne Text jetzt schon einzutragen hiesse, leere Blasen zu zeigen.
-    // Der Zeitstempel der Nachricht selbst, sonst der des Umschlags.
-    // Metadata fuehrt ihn als DateTime, nicht als Zahl.
-    let umschlag = inhalt.metadata.client_timestamp.timestamp_millis() as u64;
-
-    let (text, zeit) = match &inhalt.body {
-        ContentBody::DataMessage(d) => (
-            d.body.clone().unwrap_or_default(),
-            d.timestamp.unwrap_or(umschlag),
-        ),
-        // Was man selbst vom Haupttelefon aus geschrieben hat, kommt als
-        // Synchronisierung herein -- sonst fehlte im Verlauf die eigene
-        // Haelfte des Gespraechs.
-        ContentBody::SynchronizeMessage(s) => match &s.content {
-            Some(SyncContent::Sent(sent)) => match &sent.message {
-                Some(d) => (
-                    d.body.clone().unwrap_or_default(),
-                    d.timestamp.unwrap_or(umschlag),
-                ),
-                None => return,
-            },
-            _ => return,
-        },
-        _ => return,
-    };
-    if text.is_empty() {
-        return;
-    }
-
     let Ok(thread) = Thread::try_from(&*inhalt) else {
         return;
     };
@@ -359,21 +338,12 @@ async fn verarbeiten(
         Thread::Group(schluessel) => chats::kennung_gruppe(schluessel),
     };
     let titel = manager.thread_title(&thread).await.unwrap_or_default();
-
-    // Eine eigene Nachricht erkennt man daran, dass der Absender die
-    // eigene Kennung traegt -- bei einer Synchronisierung vom
-    // Haupttelefon ist das immer so.
     let eigene = manager.registration_data().service_ids.aci;
-    let von_mir = inhalt.metadata.sender.raw_uuid() == eigene;
 
-    let n = chats::Nachricht {
-        // Der Zeitstempel ist bei Signal zugleich die Kennung.
-        id: zeit.to_string(),
-        chat_jid: jid,
-        sender: inhalt.metadata.sender.service_id_string(),
-        text,
-        from_me: von_mir,
-        timestamp: zeit / 1000,
+    // Derselbe Bauer wie beim Lesen aus dem Speicher -- zwei Fassungen
+    // davon waeren zwei Gelegenheiten, sie auseinanderlaufen zu lassen.
+    let Some(n) = nachricht_aus(&inhalt, &jid, eigene) else {
+        return;
     };
     if let Ok(mut s) = chats.lock() {
         s.eintragen(n, &titel);
@@ -425,14 +395,14 @@ async fn senden(
     if let Ok(mut s) = chats.lock() {
         let eigene = manager.registration_data().service_ids.aci.to_string();
         s.eintragen(
-            chats::Nachricht {
-                id: zeit.to_string(),
-                chat_jid: an.to_string(),
-                sender: eigene,
-                text: text.to_string(),
-                from_me: true,
-                timestamp: zeit / 1000,
-            },
+            chats::Nachricht::text(
+                zeit.to_string(),
+                an.to_string(),
+                eigene,
+                text.to_string(),
+                true,
+                zeit / 1000,
+            ),
             "",
         );
     }
@@ -453,15 +423,25 @@ async fn schnappschuss_fuellen(
     use presage::store::{ContentsStore, Thread};
 
     let mut faeden: Vec<(Thread, String)> = Vec::new();
+    // Kennung -> Name. Ohne diese Karte steht in Gruppen eine rohe UUID
+    // ueber jeder fremden Nachricht.
+    let mut namen: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     match manager.store().contacts().await {
         Ok(liste) => {
             for k in liste.flatten() {
                 let id = ServiceId::from(Aci::from(k.uuid));
+                if !k.name.is_empty() {
+                    namen.insert(id.service_id_string(), k.name.clone());
+                }
                 faeden.push((Thread::Contact(id), k.name));
             }
         }
         Err(e) => eprintln!("Kontakte nicht lesbar: {e}"),
+    }
+    if let Ok(mut s) = chats.lock() {
+        s.namen_setzen(namen);
     }
     match manager.store().groups().await {
         Ok(liste) => {
@@ -516,22 +496,37 @@ fn nachricht_aus(
     use presage::libsignal_service::proto::sync_message::Content as SyncContent;
 
     let umschlag = inhalt.metadata.client_timestamp.timestamp_millis() as u64;
-    let (text, zeit) = match &inhalt.body {
-        ContentBody::DataMessage(d) => {
-            (d.body.clone()?, d.timestamp.unwrap_or(umschlag))
-        }
+    let daten = match &inhalt.body {
+        ContentBody::DataMessage(d) => d,
+        // Was man selbst vom Hauptgeraet aus geschrieben hat, kommt als
+        // Synchronisierung herein -- sonst fehlte im Verlauf die eigene
+        // Haelfte des Gespraechs.
         ContentBody::SynchronizeMessage(s) => match &s.content {
-            Some(SyncContent::Sent(sent)) => {
-                let d = sent.message.as_ref()?;
-                (d.body.clone()?, d.timestamp.unwrap_or(umschlag))
-            }
+            Some(SyncContent::Sent(sent)) => sent.message.as_ref()?,
             _ => return None,
         },
         _ => return None,
     };
-    if text.is_empty() {
+    let zeit = daten.timestamp.unwrap_or(umschlag);
+    let text = daten.body.clone().unwrap_or_default();
+
+    // Der erste Anhang bestimmt, wie die Nachricht aussieht. Mehrere in
+    // einer Nachricht kommen vor, sind aber selten -- und in einer Blase
+    // waeren sie ohnehin nicht unterzubringen.
+    let (art, name, groesse) = match daten.attachments.first() {
+        Some(a) => {
+            let (mime, name, groesse) = medien::beschreibung(a);
+            (medien::art(&mime).to_string(), name, groesse)
+        }
+        None => (String::new(), String::new(), 0),
+    };
+
+    // Ohne Text und ohne Anhang gibt es nichts zu zeigen; eine leere
+    // Blase waere schlimmer als gar keine.
+    if text.is_empty() && art.is_empty() {
         return None;
     }
+
     Some(chats::Nachricht {
         id: zeit.to_string(),
         chat_jid: jid.to_string(),
@@ -541,5 +536,9 @@ fn nachricht_aus(
         // Ueber die Uuid vergleichen, dann passt es auf beiden Seiten.
         from_me: inhalt.metadata.sender.raw_uuid() == eigene,
         timestamp: zeit / 1000,
+        media_type: art,
+        file_name: name,
+        size: groesse,
+        local_path: String::new(),
     })
 }

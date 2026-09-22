@@ -74,12 +74,39 @@ pub struct Nachricht {
     #[serde(rename = "fromMe")]
     pub from_me: bool,
     pub timestamp: u64,
+    /// "image", "video", "audio", "document" -- leer, wenn kein Anhang.
+    #[serde(rename = "mediaType")]
+    pub media_type: String,
+    #[serde(rename = "fileName")]
+    pub file_name: String,
+    pub size: u64,
+    /// Gesetzt, sobald der Anhang auf dem Geraet liegt. Auf 2G will man
+    /// nicht jeden Anhang eines Verlaufs ungefragt holen.
+    #[serde(rename = "localPath")]
+    pub local_path: String,
+}
+
+impl Nachricht {
+    /// Ohne Anhang -- der haeufige Fall.
+    pub fn text(id: String, chat_jid: String, sender: String, text: String,
+                from_me: bool, timestamp: u64) -> Self {
+        Nachricht {
+            id, chat_jid, sender, text, from_me, timestamp,
+            media_type: String::new(),
+            file_name: String::new(),
+            size: 0,
+            local_path: String::new(),
+        }
+    }
 }
 
 #[derive(Default)]
 pub struct Schnappschuss {
     chats: HashMap<String, Chat>,
     nachrichten: HashMap<String, Vec<Nachricht>>,
+    /// Kennung -> Name, aus den Kontakten. In einer Gruppe steht sonst
+    /// eine rohe UUID ueber der Nachricht statt eines Namens.
+    namen: HashMap<String, String>,
     /// Zaehlt jede Aenderung. Die Oberflaeche haengt daran statt zu pollen
     /// -- dasselbe Verfahren wie beim WhatsApp-Backend.
     pub folge: u64,
@@ -88,6 +115,13 @@ pub struct Schnappschuss {
 impl Schnappschuss {
     /// Traegt eine Nachricht ein und schreibt den Chat fort.
     pub fn eintragen(&mut self, n: Nachricht, chatname: &str) {
+        // Den Absender erst hier aufloesen: die Namenskarte fuellt sich
+        // asynchron aus den Kontakten, und der Bauer der Nachricht kennt
+        // sie nicht.
+        let mut n = n;
+        if !n.sender.is_empty() {
+            n.sender = self.name_zu(&n.sender);
+        }
         let chat = self.chats.entry(n.chat_jid.clone()).or_insert_with(|| Chat {
             jid: n.chat_jid.clone(),
             name: chatname.to_string(),
@@ -110,13 +144,41 @@ impl Schnappschuss {
 
         let verlauf = self.nachrichten.entry(n.chat_jid.clone()).or_default();
         // Doppelte abweisen: derselbe Zeitstempel ist bei Signal die
-        // Kennung einer Nachricht.
-        if verlauf.iter().any(|m| m.id == n.id) {
+        // Kennung einer Nachricht. Ein bereits heruntergeladener Anhang
+        // darf dabei nicht verlorengehen -- der Speicher weiss nichts
+        // davon, wohin wir die Datei gelegt haben.
+        if let Some(vorhanden) = verlauf.iter_mut().find(|m| m.id == n.id) {
+            if vorhanden.local_path.is_empty() && !n.local_path.is_empty() {
+                vorhanden.local_path = n.local_path;
+                self.folge += 1;
+            }
             return;
         }
         verlauf.push(n);
         verlauf.sort_by_key(|m| m.timestamp);
         self.folge += 1;
+    }
+
+    /// Vermerkt, wo ein heruntergeladener Anhang liegt.
+    pub fn pfad_setzen(&mut self, jid: &str, id: &str, pfad: &str) {
+        if let Some(v) = self.nachrichten.get_mut(jid) {
+            if let Some(m) = v.iter_mut().find(|m| m.id == id) {
+                m.local_path = pfad.to_string();
+                self.folge += 1;
+            }
+        }
+    }
+
+    pub fn namen_setzen(&mut self, namen: HashMap<String, String>) {
+        self.namen = namen;
+    }
+
+    /// Der Anzeigename zu einer Kennung, oder die Kennung selbst.
+    pub fn name_zu(&self, kennung: &str) -> String {
+        self.namen
+            .get(kennung)
+            .cloned()
+            .unwrap_or_else(|| kennung.to_string())
     }
 
     pub fn chatname_setzen(&mut self, jid: &str, name: &str) {
