@@ -396,6 +396,31 @@ async fn verarbeiten(
         }
     }
 
+    // Reaktionen kommen als eigene Nachrichten herein, die weder Text
+    // noch Anhang tragen -- vor dieser Abfrage fielen sie durch, und
+    // Michaels Daumen war nirgends zu sehen. Sie zeigen ueber den
+    // Zeitstempel auf die Nachricht, der sie gelten.
+    if let presage::libsignal_service::content::ContentBody::DataMessage(d) = &inhalt.body {
+        if let Some(r) = &d.reaction {
+            let ziel = r.target_sent_timestamp.unwrap_or(0);
+            if ziel != 0 {
+                let wer = inhalt.metadata.sender.service_id_string();
+                if let Ok(mut c) = chats.lock() {
+                    let anzeige = c.name_zu(&wer);
+                    c.reaktion_setzen(
+                        &jid,
+                        &ziel.to_string(),
+                        r.emoji.as_deref().unwrap_or(""),
+                        &anzeige,
+                        r.remove.unwrap_or(false),
+                    );
+                }
+                println!("😀 Reaktion {} auf {ziel}", r.emoji.as_deref().unwrap_or("-"));
+            }
+            return;
+        }
+    }
+
     // Derselbe Bauer wie beim Lesen aus dem Speicher -- zwei Fassungen
     // davon waeren zwei Gelegenheiten, sie auseinanderlaufen zu lassen.
     let Some(n) = nachricht_aus(&inhalt, &jid, eigene) else {
@@ -648,6 +673,17 @@ fn nachricht_aus(
         None => (String::new(), String::new(), 0),
     };
 
+    // Antwortbezug: wer auf eine Nachricht antwortet, schickt einen
+    // Ausschnitt davon mit. Ohne ihn steht die Antwort ohne Zusammenhang
+    // da -- im Feld war genau das zu sehen.
+    let (zitat_text, zitat_von) = match &daten.quote {
+        Some(q) => (
+            q.text.clone().unwrap_or_default(),
+            q.author_aci.clone().unwrap_or_default(),
+        ),
+        None => (String::new(), String::new()),
+    };
+
     // Ohne Text und ohne Anhang gibt es nichts zu zeigen; eine leere
     // Blase waere schlimmer als gar keine.
     if text.is_empty() && art.is_empty() {
@@ -667,6 +703,9 @@ fn nachricht_aus(
         file_name: name,
         size: groesse,
         local_path: String::new(),
+        reaktionen: String::new(),
+        quoted_text: zitat_text,
+        quoted_sender: zitat_von,
     })
 }
 

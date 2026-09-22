@@ -292,9 +292,35 @@ class Daemon(object):
         return {'state': 'unauthorized'}
 
     def cmd_dialoge(self, limit):
+        """Die Chatliste.
+
+        Der Verbindungsmanager fragt sie GENAU EINMAL beim Verbinden ab
+        und baut daraus seine Namenstabelle. Eine leere Antwort ist
+        deshalb nicht bloss eine leere Antwort -- sie vergiftet die ganze
+        Sitzung: ohne Namen zeigt die Nachrichten-App rohe Kennungen
+        ("c:d3cb695d-..."), bei Personen wie bei Gruppen.
+
+        Genau das ist passiert. Der Dienst war beim Verbinden gerade neu
+        gestartet und hatte seinen Schnappschuss noch nicht aufgebaut; er
+        antwortete mit null Chats, und dabei blieb es.
+
+        Deshalb wird hier gewartet, statt eine leere Liste zurueckzugeben.
+        Lieber laesst man den Manager ein paar Sekunden stehen, als ihm
+        etwas Unbrauchbares zu geben, das er nie wieder nachfragt.
+        """
         self._sicher_verbunden()
         self._namen_auffrischen()
         chats = self.backend.chats()
+        versuche = 0
+        while not chats and versuche < 12:
+            versuche += 1
+            time.sleep(2)
+            try:
+                chats = self.backend.chats()
+            except Exception:
+                pass
+        if versuche:
+            log('Chatliste kam erst nach %d Sekunden' % (versuche * 2))
         chats.sort(key=lambda c: c.get('lastTime', 0), reverse=True)
         dialoge = []
         for c in chats[:limit]:

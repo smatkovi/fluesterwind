@@ -98,6 +98,13 @@ pub struct Nachricht {
     /// nicht jeden Anhang eines Verlaufs ungefragt holen.
     #[serde(rename = "localPath")]
     pub local_path: String,
+    /// Die Reaktionen darauf, schon zusammengefasst: "👍 2 ❤ 1".
+    pub reaktionen: String,
+    /// Die zitierte Nachricht, wenn dies eine Antwort ist.
+    #[serde(rename = "quotedText")]
+    pub quoted_text: String,
+    #[serde(rename = "quotedSender")]
+    pub quoted_sender: String,
 }
 
 impl Nachricht {
@@ -110,6 +117,9 @@ impl Nachricht {
             file_name: String::new(),
             size: 0,
             local_path: String::new(),
+            reaktionen: String::new(),
+            quoted_text: String::new(),
+            quoted_sender: String::new(),
         }
     }
 }
@@ -121,6 +131,8 @@ pub struct Schnappschuss {
     /// Kennung -> Name, aus den Kontakten. In einer Gruppe steht sonst
     /// eine rohe UUID ueber der Nachricht statt eines Namens.
     namen: HashMap<String, String>,
+    /// Chat -> Nachrichtenkennung -> (wer, welches Zeichen).
+    reaktionen: HashMap<String, HashMap<String, Vec<(String, String)>>>,
     /// Gruppenkennung -> Mitglieder. Beim Aufbau abgelegt, damit die
     /// Abfrage aus der Oberflaeche nicht ueber den Signal-Faden muss.
     mitglieder: HashMap<String, Vec<Mitglied>>,
@@ -166,21 +178,93 @@ impl Schnappschuss {
             chat.from_me = n.from_me;
         }
 
+        // Eine Reaktion kann vor der Nachricht eintreffen, auf die sie
+        // zeigt -- beim Nachholen aus dem Speicher ist das der Normalfall.
+        // Sie steht dann schon bereit und wird hier angeheftet. Erst
+        // nachschlagen, dann den Verlauf entleihen: beides zugleich laesst
+        // der Rust-Uebersetzer nicht zu, und mit Recht.
+        let schon_bekannt = self
+            .reaktionen
+            .get(&n.chat_jid)
+            .and_then(|k| k.get(&n.id))
+            .map(|l| Self::zusammenfassen(l));
+
         let verlauf = self.nachrichten.entry(n.chat_jid.clone()).or_default();
         // Doppelte abweisen: derselbe Zeitstempel ist bei Signal die
         // Kennung einer Nachricht. Ein bereits heruntergeladener Anhang
         // darf dabei nicht verlorengehen -- der Speicher weiss nichts
         // davon, wohin wir die Datei gelegt haben.
         if let Some(vorhanden) = verlauf.iter_mut().find(|m| m.id == n.id) {
+            let mut geaendert = false;
             if vorhanden.local_path.is_empty() && !n.local_path.is_empty() {
                 vorhanden.local_path = n.local_path;
+                geaendert = true;
+            }
+            if geaendert {
                 self.folge += 1;
             }
             return;
         }
+        let mut n = n;
+        if let Some(r) = schon_bekannt {
+            n.reaktionen = r;
+        }
         verlauf.push(n);
         verlauf.sort_by_key(|m| m.timestamp);
         self.folge += 1;
+    }
+
+    /// Traegt eine Reaktion ein oder nimmt sie zurueck.
+    ///
+    /// Reaktionen kommen als eigene Nachrichten herein, die weder Text
+    /// noch Anhang tragen -- vor dieser Aenderung fielen sie deshalb
+    /// durch. Sie zeigen auf die Nachricht, der sie gelten, ueber deren
+    /// Zeitstempel; der ist bei Signal zugleich die Kennung.
+    pub fn reaktion_setzen(
+        &mut self,
+        jid: &str,
+        ziel: &str,
+        emoji: &str,
+        von: &str,
+        entfernen: bool,
+    ) {
+        let eintrag = self.reaktionen.entry(jid.to_string()).or_default();
+        let liste = eintrag.entry(ziel.to_string()).or_default();
+        liste.retain(|(w, _)| w != von);
+        if !entfernen && !emoji.is_empty() {
+            liste.push((von.to_string(), emoji.to_string()));
+        }
+        let zusammen = Self::zusammenfassen(liste);
+        if let Some(v) = self.nachrichten.get_mut(jid) {
+            if let Some(m) = v.iter_mut().find(|m| m.id == ziel) {
+                m.reaktionen = zusammen;
+                self.folge += 1;
+            }
+        }
+    }
+
+    /// Gleiche Zeichen zusammenzaehlen: "👍 2 ❤ 1".
+    fn zusammenfassen(liste: &[(String, String)]) -> String {
+        let mut reihenfolge: Vec<String> = Vec::new();
+        let mut zaehler: HashMap<String, usize> = HashMap::new();
+        for (_, e) in liste {
+            if !zaehler.contains_key(e) {
+                reihenfolge.push(e.clone());
+            }
+            *zaehler.entry(e.clone()).or_insert(0) += 1;
+        }
+        reihenfolge
+            .iter()
+            .map(|e| {
+                let n = zaehler[e];
+                if n > 1 {
+                    format!("{e} {n}")
+                } else {
+                    e.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
     }
 
     /// Vermerkt, wo ein heruntergeladener Anhang liegt.
