@@ -86,8 +86,45 @@ void Backend::setzeFehler(const QString &text)
     emit fehlerChanged();
 }
 
+// kontoEinrichten legt das Konto an, ueber das Signal in der
+// Nachrichten-App erscheint.
+//
+// Warum aus der App und nicht aus dem postinst, wo es hingehoerte: dort
+// laeuft alles als root, und mc-tool wie ag-tool schreiben in die
+// Kontoverzeichnisse der Sitzung. Die Kennung zu wechseln verweigert Aegis
+// gleich zweifach -- "su: can't set groups: Operation not permitted" und
+// "start-stop-daemon: unable to set gid to 29999". Die App dagegen laeuft
+// ohnehin als "user" und hat den Sitzungsbus.
+//
+// Die Marke haelt fest, dass es getan ist, und wird mit dem Skript
+// verglichen: ist das Skript neuer, lief zwischendurch ein Upgrade. Das
+// Skript selbst ist so gebaut, dass ein zweiter Lauf nichts anrichtet.
+static void kontoEinrichten()
+{
+    const QString skript = QLatin1String("/opt/pysignal/signal-setup");
+    const QFileInfo si(skript);
+    if (!si.exists() || !si.isExecutable())
+        return;
+
+    QDir d(QDir::homePath() + QLatin1String("/.local/share/harbour/fluesterwind"));
+    if (!d.exists())
+        d.mkpath(QLatin1String("."));
+    const QString markePfad = d.absoluteFilePath(QLatin1String("konto-eingerichtet"));
+    const QFileInfo mi(markePfad);
+    if (mi.exists() && mi.lastModified() >= si.lastModified())
+        return;
+
+    if (!QProcess::startDetached(skript, QStringList() << QLatin1String("add")))
+        return;
+    QFile marke(markePfad);
+    if (marke.open(QIODevice::WriteOnly))
+        marke.close();
+}
+
 void Backend::starten()
 {
+    kontoEinrichten();
+
     // Laeuft schon einer? Dann nur anklopfen. Der Dienst haelt sich selbst
     // an genau eine Instanz, aber ein zweiter Start kostet auf diesem
     // Geraet mehrere Sekunden.

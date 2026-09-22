@@ -1,0 +1,123 @@
+#!/bin/sh
+# Legt die Konten an, die Signal auf diesem Geraet braucht, und entfernt
+# sie wieder.
+#
+#   signal-setup add      # bei der Installation
+#   signal-setup remove   # bei der Deinstallation
+#
+# Zwei Dinge, die man sich hier erarbeiten muss:
+#
+# 1) ZWEI Kontospeicher. mc-tool schreibt nach ~/.rtcom-accounts/accounts.cfg,
+#    die Kontoverwaltung der Oberflaeche liest aber libaccounts
+#    (~/.accounts/accounts.db). Ein nur mit mc-tool angelegtes Konto laeuft
+#    zwar, steht in der Oberflaeche aber ohne Namen da -- genau das war bei
+#    den vorhandenen Telegram- und Matrix-Konten zu sehen. Deshalb hier
+#    beides: mc-tool legt das Telepathy-Konto an, ag-tool den Eintrag in
+#    libaccounts, und "tmc-uid" verbindet die zwei. Ein Duplikat entsteht
+#    dabei nicht.
+#
+# 2) Mission Control liest die Protokolliste nur beim Start, und es fragt
+#    dazu den laufenden Verbindungsmanager. Nach dem Einpassen von Signal
+#    muessen deshalb beide neu starten, sonst antwortet mc-tool mit
+#    "Protocol signal not found". Das erledigt das postinst.
+#
+# mc-tool und ag-tool sprechen mit der Sitzung. Aus einem postinst heraus
+# laeuft dieses Skript als root und ohne Sitzungsbus -- beides wird hier
+# nachgeholt, sonst passiert schlicht nichts.
+set -e
+
+BEFEHL=${1:-add}
+
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && [ -f /tmp/session_bus_address.user ]; then
+    . /tmp/session_bus_address.user
+    export DBUS_SESSION_BUS_ADDRESS
+fi
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    echo "signal-setup: kein Sitzungsbus - uebersprungen" >&2
+    exit 0
+fi
+
+DB=$HOME/.accounts/accounts.db
+
+konto_suchen() {
+    mc-tool list 2>/dev/null | grep "^$1" | head -n 1
+}
+
+# Letzte libaccounts-Kennung zu einem Anbieter, oder leer.
+ag_id() {
+    python -c "
+import sqlite3, sys
+try:
+    c = sqlite3.connect('$DB')
+    r = [x[0] for x in c.execute('select id from Accounts where provider=?', ('$1',))]
+    print r[-1] if r else ''
+except Exception:
+    print ''
+" 2>/dev/null
+}
+
+case "$BEFEHL" in
+add)
+    # --- Nachrichten: Telepathy-Konto ----------------------------------
+    KONTO=$(konto_suchen pybridge/signal/)
+    if [ -n "$KONTO" ]; then
+        echo "signal-setup: Nachrichtenkonto besteht schon ($KONTO)"
+    else
+        # Der Parameter "account" bestimmt den Pfad: Signal ->
+        # pybridge/signal/Signal0. Darauf faellt der Verbindungsmanager
+        # zurueck, wenn die Abfrage beim Kontoverwalter scheitert -- die
+        # beiden muessen zusammenpassen.
+        mc-tool add pybridge/signal Signal string:account=Signal >/dev/null 2>&1 || true
+        KONTO=$(konto_suchen pybridge/signal/)
+    fi
+    if [ -n "$KONTO" ]; then
+        mc-tool display "$KONTO" Signal            >/dev/null 2>&1 || true
+        mc-tool service "$KONTO" signal            >/dev/null 2>&1 || true
+        mc-tool icon    "$KONTO" icon-m-service-signal >/dev/null 2>&1 || true
+        mc-tool enable  "$KONTO"                     >/dev/null 2>&1 || true
+        mc-tool auto-connect "$KONTO" on             >/dev/null 2>&1 || true
+        echo "signal-setup: Telepathy-Konto $KONTO bereit"
+    else
+        echo "signal-setup: Telepathy-Konto konnte nicht angelegt werden" >&2
+    fi
+
+    # --- Nachrichten: Eintrag fuer die Kontoverwaltung ------------------
+    if [ -n "$(ag_id signal)" ]; then
+        echo "signal-setup: libaccounts-Eintrag besteht schon"
+    elif [ -n "$KONTO" ]; then
+        ag-tool create-account signal Signal enable >/dev/null 2>&1 || true
+        ID=$(ag_id signal)
+        if [ -n "$ID" ]; then
+            ag-tool enable-service "$ID" signal >/dev/null 2>&1 || true
+            ag-tool update-service "$ID" signal string:tmc-uid="$KONTO" >/dev/null 2>&1 || true
+            ag-tool update-service "$ID" signal string:ConnectAutomatically=true >/dev/null 2>&1 || true
+            echo "signal-setup: libaccounts-Eintrag $ID -> $KONTO"
+        fi
+    fi
+
+    ;;
+
+remove)
+    # Nur das eigene Konto anfassen -- deshalb der enge Namensvergleich.
+
+    for muster in pybridge/signal/; do
+        KONTO=$(konto_suchen "$muster")
+        if [ -n "$KONTO" ]; then
+            mc-tool remove "$KONTO" >/dev/null 2>&1 || true
+            echo "signal-setup: $KONTO entfernt"
+        fi
+    done
+    ID=$(ag_id signal)
+    if [ -n "$ID" ]; then
+        ag-tool delete-account "$ID" >/dev/null 2>&1 || true
+        echo "signal-setup: libaccounts-Eintrag $ID entfernt"
+    fi
+    pkill -f signal_daemon.py >/dev/null 2>&1 || true
+    ;;
+
+*)
+    echo "Gebrauch: $0 [add|remove]" >&2
+    exit 1
+    ;;
+esac
+exit 0

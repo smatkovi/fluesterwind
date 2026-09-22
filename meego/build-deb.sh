@@ -29,6 +29,38 @@ chmod 755 "$STAGE/opt/fluesterwind/bin/"*
 cp meego/qml/*.qml "$STAGE/opt/fluesterwind/qml/"
 cp meego/fluesterwind.desktop "$STAGE/usr/share/applications/"
 
+# --- Hintergrunddienst -----------------------------------------------------
+# Der Dienst soll laufen, auch wenn die App zu ist -- sonst kommen
+# Nachrichten erst an, wenn man nachsieht. Jobs unter ~/.config/upstart
+# liest auf diesem Geraet niemand, und nach /etc/init/xsession/ kommt ein
+# unsigniertes Paket nicht (Aegis verweigert dort jede Datei ohne
+# Referenz-Hash). Der Sitzungs-D-Bus ist der Weg, der bleibt.
+mkdir -p "$STAGE/usr/share/dbus-1/services" "$STAGE/etc/init/apps"
+cp meego/org.smatkovi.Fluesterwind.service "$STAGE/usr/share/dbus-1/services/"
+cp meego/fluesterwind-trigger.conf "$STAGE/etc/init/apps/fluesterwind.conf"
+
+# --- Nachrichten-App: der pybridge-Anschluss --------------------------------
+# pybridge ist der Telepathy-Verbindungsmanager, der auf diesem Geraet
+# schon Telegram, Matrix und WhatsApp in die Nachrichten-App traegt. Signal
+# haengt sich daran: ein Daemon, der auf der einen Seite pybridges
+# Zeilen-JSON spricht und auf der anderen unsere HTTP-Schnittstelle.
+mkdir -p "$STAGE/opt/pysignal" \
+         "$STAGE/usr/share/accounts/services" \
+         "$STAGE/usr/share/accounts/providers" \
+         "$STAGE/usr/share/themes/blanco/meegotouch/icons"
+cp meego/pybridge/signal_daemon.py   "$STAGE/opt/pysignal/"
+cp meego/pybridge/patch-pybridge.py  "$STAGE/opt/pysignal/"
+cp meego/pybridge/signal-setup       "$STAGE/opt/pysignal/"
+chmod 755 "$STAGE/opt/pysignal/"*.py "$STAGE/opt/pysignal/signal-setup"
+cp meego/pybridge/signal.service  "$STAGE/usr/share/accounts/services/"
+cp meego/pybridge/signal.provider "$STAGE/usr/share/accounts/providers/"
+cp meego/pybridge/icon-m-service-signal.png \
+   meego/pybridge/icon-s-service-signal.png \
+   "$STAGE/usr/share/themes/blanco/meegotouch/icons/"
+
+cp meego/postinst meego/prerm "$STAGE/DEBIAN/"
+chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm"
+
 # Das Symbol traegt die exakte Silhouette der Standard-Apps; ein rundes
 # faellt im Raster des Startbildschirms sofort auf.
 cp meego/icons/icon-80.png "$STAGE/usr/share/icons/hicolor/80x80/apps/fluesterwind.png"

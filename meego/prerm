@@ -1,0 +1,15 @@
+#!/bin/sh
+# Vor dem Entfernen: Konto loeschen, Dienste beenden.
+set -e
+
+if [ -x /opt/pysignal/signal-setup ] && [ -x /sbin/start-stop-daemon ]; then
+    /sbin/start-stop-daemon --start --chuid user \
+        --exec /opt/pysignal/signal-setup -- remove >/dev/null 2>&1 || true
+fi
+
+for p in 8095 8096 8097 8098 8099; do
+    curl -s -m 5 "http://127.0.0.1:$p/quit" >/dev/null 2>&1 || true
+done
+pkill -f signal_daemon.py >/dev/null 2>&1 || true
+
+exit 0

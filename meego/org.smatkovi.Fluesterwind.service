@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.smatkovi.Fluesterwind
+Exec=/bin/sh -c "exec /opt/fluesterwind/bin/signal-backend >> /home/user/.local/share/harbour/fluesterwind/dienst.log 2>&1"

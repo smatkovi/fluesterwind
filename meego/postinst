@@ -1,0 +1,57 @@
+#!/bin/sh
+# Nach dem Auspacken: die alte Instanz abloesen, Signal in pybridge
+# einhaengen, den Dienst wieder hochziehen.
+set -e
+
+# --- 1) Die laufende alte Instanz abloesen ----------------------------------
+# /quit beendet sauber; die Dateisperre gaebe sonst erst frei, wenn der
+# Prozess von selbst endet.
+for p in 8095 8096 8097 8098 8099; do
+    curl -s -m 5 "http://127.0.0.1:$p/quit" >/dev/null 2>&1 || true
+done
+
+# --- 2) Signal in pybridge einhaengen ---------------------------------------
+# Nur wenn pybridge ueberhaupt da ist. Ohne den Verbindungsmanager gibt es
+# keine Anbindung an die Nachrichten-App -- die App selbst laeuft trotzdem.
+ANGEPASST=0
+if [ -f /opt/pybridge/pybridge_cm.py ]; then
+    if /usr/bin/python /opt/pysignal/patch-pybridge.py; then
+        ANGEPASST=1
+    else
+        echo "fluesterwind: pybridge nicht angepasst - Nachrichten-App-Anbindung bleibt aus" >&2
+    fi
+fi
+
+# Beide muessen neu starten, und in dieser Reihenfolge: der
+# Verbindungsmanager liest seine Protokolliste nur beim Start, und Mission
+# Control fragt fuer "kennst du dieses Protokoll?" den laufenden Manager.
+# Laeuft noch der alte, antwortet mc-tool mit "Protocol signal not found".
+if [ "$ANGEPASST" = "1" ]; then
+    pkill -f pybridge_cm.py    >/dev/null 2>&1 || true
+    sleep 1
+    pkill -f mission-control-5 >/dev/null 2>&1 || true
+    sleep 4
+fi
+
+# --- 3) Konto: hier nicht ---------------------------------------------------
+# Das Konto legt die App beim Start an, nicht dieses Skript. Der Grund ist
+# Aegis: von hier aus laeuft alles als root, mc-tool und ag-tool schreiben
+# aber in die Kontoverzeichnisse der Sitzung, und jeder Weg zum
+# Kennungswechsel ist versperrt -- "su: can't set groups" ebenso wie
+# "start-stop-daemon: unable to set gid to 29999".
+
+# --- 4) Den Dienst wieder hochziehen ----------------------------------------
+# Nicht ueber initctl: aus dem dpkg-Kontext scheitert das ebenso still wie
+# der Kennungswechsel. Der Weg, der geht, ist der Sitzungs-D-Bus -- ein
+# nackter root kommt daran, und ein darueber aktivierter Dienst laeuft als
+# Besitzer des Busses, also als "user".
+BUS=$(sed -n 's/.*DBUS_SESSION_BUS_ADDRESS=//p' /tmp/session_bus_address.user 2>/dev/null \
+      | tr -d '";' | head -1)
+if [ -n "$BUS" ]; then
+    DBUS_SESSION_BUS_ADDRESS="$BUS" dbus-send --session --print-reply \
+        --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus.StartServiceByName \
+        string:org.smatkovi.Fluesterwind uint32:0 >/dev/null 2>&1 || true
+fi
+
+exit 0
