@@ -139,3 +139,30 @@ impl Schnappschuss {
         self.nachrichten.get(jid).cloned().unwrap_or_default()
     }
 }
+
+impl Schnappschuss {
+    /// Legt einen Chat an, auch ohne Nachricht darin.
+    ///
+    /// Ein Kontakt, mit dem man noch nie geschrieben hat, taucht sonst
+    /// nirgends auf -- und laesst sich dann auch nicht anschreiben.
+    pub fn anlegen(&mut self, jid: &str, name: &str) {
+        if self.chats.contains_key(jid) {
+            return;
+        }
+        if name.is_empty() {
+            return;
+        }
+        self.chats.insert(
+            jid.to_string(),
+            Chat {
+                jid: jid.to_string(),
+                name: name.to_string(),
+                is_group: ist_gruppe(jid),
+                last_message: String::new(),
+                last_time: 0,
+                from_me: false,
+            },
+        );
+        self.folge += 1;
+    }
+}

@@ -112,6 +112,13 @@ fn main() {
 
         if let Some(m) = manager.as_mut() {
             uebernehmen(m, &lage).await;
+            schnappschuss_fuellen(m, &chats).await;
+            // Die Kontaktliste liegt beim Hauptgeraet; ein Zweitgeraet
+            // muss sie sich schicken lassen. Ohne das stehen in der
+            // Chatliste nur Kennungen statt Namen.
+            if let Err(e) = m.request_contacts().await {
+                eprintln!("Kontakte nicht angefordert: {e}");
+            }
             empfangen_starten(m.clone(), lage.clone(), chats.clone());
         }
 
@@ -121,6 +128,9 @@ fn main() {
                     match verknuepfen(speicher.clone(), lage.clone()).await {
                         Ok(mut m) => {
                             uebernehmen(&mut m, &lage).await;
+                            if let Err(e) = m.request_contacts().await {
+                                eprintln!("Kontakte nicht angefordert: {e}");
+                            }
                             empfangen_starten(m.clone(), lage.clone(), chats.clone());
                             manager = Some(m);
                         }
@@ -255,12 +265,25 @@ async fn verarbeiten(
 
     let inhalt = match empfangen {
         Received::Content(c) => c,
+        // Beide sind der Anlass, den Schnappschuss neu aufzubauen.
+        //
+        // Die Kontaktliste kommt vom Hauptgeraet und trifft erst Sekunden
+        // nach dem Verbinden ein -- wer nur beim Start liest, sieht sie
+        // nie und zeigt eine leere Chatliste, obwohl die Datenbank voll
+        // ist. Genau das war beim ersten Lauf zu sehen: "0 Unterhaltungen
+        // im Speicher", und gleich darauf "Kontakte erhalten".
+        //
+        // Ein zweiter Durchlauf richtet keinen Schaden an: Nachrichten
+        // werden ueber ihren Zeitstempel erkannt, vorhandene Chats nicht
+        // noch einmal angelegt.
         Received::QueueEmpty => {
             println!("📭 Warteschlange leer");
+            schnappschuss_fuellen(manager, chats).await;
             return;
         }
         Received::Contacts => {
             println!("📇 Kontakte erhalten");
+            schnappschuss_fuellen(manager, chats).await;
             return;
         }
         Received::DecryptionError(wer) => {
@@ -312,8 +335,7 @@ async fn verarbeiten(
     // eigene Kennung traegt -- bei einer Synchronisierung vom
     // Haupttelefon ist das immer so.
     let eigene = manager.registration_data().service_ids.aci;
-    let absender = inhalt.metadata.sender.raw_uuid();
-    let von_mir = absender == eigene;
+    let von_mir = inhalt.metadata.sender.raw_uuid() == eigene;
 
     let n = chats::Nachricht {
         // Der Zeitstempel ist bei Signal zugleich die Kennung.
@@ -386,4 +408,109 @@ async fn senden(
         );
     }
     Ok(())
+}
+
+/// Baut den Schnappschuss aus dem, was schon im Speicher liegt.
+///
+/// Die Empfangsschleife sieht nur, was waehrend ihrer Laufzeit
+/// hereinkommt. Nach einem Neustart -- und direkt nach dem Verknuepfen --
+/// waere die Chatliste deshalb leer, obwohl die Datenbank voll ist. Also
+/// einmal durch Kontakte und Gruppen gehen und ihre Unterhaltungen holen.
+async fn schnappschuss_fuellen(
+    manager: &mut Manager<SqliteStore, Registered>,
+    chats: &GeteilteChats,
+) {
+    use presage::libsignal_service::protocol::{Aci, ServiceId};
+    use presage::store::{ContentsStore, Thread};
+
+    let mut faeden: Vec<(Thread, String)> = Vec::new();
+
+    match manager.store().contacts().await {
+        Ok(liste) => {
+            for k in liste.flatten() {
+                let id = ServiceId::from(Aci::from(k.uuid));
+                faeden.push((Thread::Contact(id), k.name));
+            }
+        }
+        Err(e) => eprintln!("Kontakte nicht lesbar: {e}"),
+    }
+    match manager.store().groups().await {
+        Ok(liste) => {
+            for (schluessel, g) in liste.flatten() {
+                faeden.push((Thread::Group(schluessel), g.title));
+            }
+        }
+        Err(e) => eprintln!("Gruppen nicht lesbar: {e}"),
+    }
+
+    println!("📇 {} Unterhaltungen im Speicher", faeden.len());
+
+    let eigene = manager.registration_data().service_ids.aci;
+    let mut gefunden = 0usize;
+    for (thread, titel) in faeden {
+        let Ok(verlauf) = manager.store().messages(&thread, ..).await else {
+            continue;
+        };
+        let jid = match &thread {
+            Thread::Contact(id) => chats::kennung_person(&id.service_id_string()),
+            Thread::Group(s) => chats::kennung_gruppe(s),
+        };
+        for inhalt in verlauf.flatten() {
+            if let Some(n) = nachricht_aus(&inhalt, &jid, eigene) {
+                gefunden += 1;
+                if let Ok(mut s) = chats.lock() {
+                    s.eintragen(n, &titel);
+                }
+            }
+        }
+        // Auch eine Unterhaltung ohne Text gehoert in die Liste: sonst
+        // verschwindet ein Kontakt, mit dem man noch nicht geschrieben hat,
+        // und man kann ihn nicht anschreiben.
+        if let Ok(mut s) = chats.lock() {
+            s.anlegen(&jid, &titel);
+        }
+    }
+    println!("📜 {gefunden} Nachrichten aus dem Speicher");
+}
+
+/// Macht aus einem gespeicherten Inhalt eine Nachricht -- oder nichts,
+/// wenn kein Text daran haengt.
+fn nachricht_aus(
+    inhalt: &presage::libsignal_service::content::Content,
+    jid: &str,
+    // Die eigene Kennung als Uuid: service_ids.aci ist das Feld (Uuid),
+    // service_ids.aci() die Methode (Aci). Hier genuegt die Uuid, und der
+    // Absender liefert mit raw_uuid() dasselbe.
+    eigene: presage::libsignal_service::prelude::Uuid,
+) -> Option<chats::Nachricht> {
+    use presage::libsignal_service::content::ContentBody;
+    use presage::libsignal_service::proto::sync_message::Content as SyncContent;
+
+    let umschlag = inhalt.metadata.client_timestamp.timestamp_millis() as u64;
+    let (text, zeit) = match &inhalt.body {
+        ContentBody::DataMessage(d) => {
+            (d.body.clone()?, d.timestamp.unwrap_or(umschlag))
+        }
+        ContentBody::SynchronizeMessage(s) => match &s.content {
+            Some(SyncContent::Sent(sent)) => {
+                let d = sent.message.as_ref()?;
+                (d.body.clone()?, d.timestamp.unwrap_or(umschlag))
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if text.is_empty() {
+        return None;
+    }
+    Some(chats::Nachricht {
+        id: zeit.to_string(),
+        chat_jid: jid.to_string(),
+        sender: inhalt.metadata.sender.service_id_string(),
+        text,
+        // raw_uuid() gibt eine Uuid; Aci ist ein eigener Typ darueber.
+        // Ueber die Uuid vergleichen, dann passt es auf beiden Seiten.
+        from_me: inhalt.metadata.sender.raw_uuid() == eigene,
+        timestamp: zeit / 1000,
+    })
 }
