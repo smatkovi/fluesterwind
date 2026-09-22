@@ -21,6 +21,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tiny_http = "0.12"
 
+# Den Verknuepfungscode zeigt das Geraet selbst an, statt ihn als Text
+# herauszureichen: Whisperfish auf dem Haupttelefon scannt einen QR-Code,
+# also soll das N950 einen malen. Beide Kisten sind reines Rust und
+# bringen keine C-Abhaengigkeit mit.
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [profile.release]
 strip = true
 opt-level = "z"

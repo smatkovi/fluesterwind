@@ -32,10 +32,17 @@ weitgehend übernommen werden können.
 
 ## Anmelden
 
-Signal kennt kein Verknüpfen per Nummerncode wie WhatsApp. Der Dienst
-erzeugt eine `sgnl://linkdevice?…`-Adresse; die lässt sich mit einer
-QR-App auf dem Rechner anzeigen und dann im Signal auf dem Haupttelefon
-abscannen. Eine Kamera braucht das N950 dafür nicht.
+Signal kennt kein Verknüpfen per Nummerncode wie WhatsApp — es gibt nur
+den Weg über ein Hauptgerät, das ein Zweitgerät aufnimmt.
+
+Das N950 hat keine Kamera-Anbindung, um einen Code zu scannen, aber einen
+Bildschirm, um einen zu zeigen. Also erzeugt der Dienst die
+`sgnl://linkdevice?…`-Adresse und malt sie unter `/pair/qr` als QR-Code;
+das Hauptgerät scannt ihn.
+
+Als Hauptgerät taugt Signal für Android oder iOS ebenso wie ein
+Whisperfish, das selbst als Hauptgerät registriert ist — dort unter
+Einstellungen → „Linked devices" → Gerät hinzufügen.
 
 ## Bauen
 

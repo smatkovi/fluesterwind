@@ -113,7 +113,7 @@ fn main() {
 
 /// Uebernimmt einen angemeldeten Manager in den Zustand.
 async fn uebernehmen(manager: Manager<SqliteStore, Registered>, lage: &GeteilteLage) {
-    let mut manager = manager;
+    let mut manager = manager; // whoami braucht ihn veraenderlich
     let nummer = manager.whoami().await.ok().map(|w| w.number.to_string());
     if let Ok(mut l) = lage.lock() {
         l.verknuepft(nummer);

@@ -31,6 +31,30 @@ pub fn starten(ports: &[u16], lage: GeteilteLage, befehle: UnboundedSender<Befeh
     std::thread::spawn(move || {
         for anfrage in server.incoming_requests() {
             let pfad = anfrage.url().split('?').next().unwrap_or("").to_string();
+            // /pair/qr liefert ein Bild, alles andere JSON.
+            if pfad == "/pair/qr" {
+                let adresse = lage.lock().ok().map(|l| l.pair_url.clone())
+                    .unwrap_or_default();
+                match (adresse.is_empty(), qr_bild(&adresse)) {
+                    (false, Some(png)) => {
+                        let antwort = tiny_http::Response::from_data(png)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Content-Type"[..], &b"image/png"[..],
+                                )
+                                .unwrap(),
+                            );
+                        let _ = anfrage.respond(antwort);
+                    }
+                    _ => {
+                        let _ = anfrage.respond(
+                            tiny_http::Response::from_string(
+                                r#"{"error":"keine Adresse"}"#)
+                                .with_status_code(404));
+                    }
+                }
+                continue;
+            }
             let (code, koerper) = beantworten(&pfad, &lage, &befehle);
             let antwort = tiny_http::Response::from_string(koerper)
                 .with_header(
@@ -84,4 +108,29 @@ fn beantworten(
         }
         _ => (404, r#"{"error":"unbekannt"}"#.into()),
     }
+}
+
+/// Malt die Verknuepfungsadresse als QR-Code.
+///
+/// Whisperfish auf dem Haupttelefon erwartet einen Code zum Abscannen,
+/// nicht eine Zeichenkette zum Einfuegen. Das N950 hat keine Kamera-
+/// Anbindung, um selbst zu scannen -- aber einen Bildschirm, um zu zeigen.
+/// Also malt es, und das Haupttelefon schaut hin.
+fn qr_bild(text: &str) -> Option<Vec<u8>> {
+    use image::{ImageEncoder, ExtendedColorType};
+    let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
+    // Vier Module Rand sind Vorschrift, sonst findet mancher Scanner den
+    // Code nicht; die Modulgroesse ist so gewaehlt, dass das Bild auf die
+    // 480 Punkte Breite des Geraets passt.
+    let bild = code
+        .render::<image::Luma<u8>>()
+        .min_dimensions(420, 420)
+        .quiet_zone(true)
+        .build();
+    let mut aus = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut aus)
+        .write_image(bild.as_raw(), bild.width(), bild.height(),
+                     ExtendedColorType::L8)
+        .ok()?;
+    Some(aus)
 }
