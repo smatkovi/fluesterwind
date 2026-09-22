@@ -1,0 +1,28 @@
+[package]
+name = "signal-backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+presage = { git = "https://github.com/whisperfish/presage" }
+# Ohne Vorgabe-Merkmale: die ziehen SQLCipher herein, und das verlangt
+# OpenSSL-Header fuer armel. Verschluesselt wird die Datenbank hier
+# ohnehin nicht -- auf Harmattan gibt es keinen Schluesseldienst, hinter
+# dem ein Schluessel besser laege als in einer Datei daneben, und die
+# Partition ist unverschluesselt. Dieselbe Abwaegung wie beim
+# WhatsApp-Port, und dort steht sie auch so im Code.
+presage-store-sqlite = { git = "https://github.com/whisperfish/presage", default-features = false }
+libsqlite3-sys = { version = "0.36", features = ["bundled"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+futures = "0.3"
+url = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
