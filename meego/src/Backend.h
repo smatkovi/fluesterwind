@@ -49,6 +49,10 @@ class Backend : public QObject
     Q_PROPERTY(QVariantList chats READ chats NOTIFY chatsChanged)
     Q_PROPERTY(QVariantList nachrichten READ nachrichten NOTIFY nachrichtenChanged)
     Q_PROPERTY(QString offenerChat READ offenerChat NOTIFY nachrichtenChanged)
+    Q_PROPERTY(QVariantList mitglieder READ mitglieder NOTIFY gruppeChanged)
+    Q_PROPERTY(QVariantList verzeichnis READ verzeichnis NOTIFY verzeichnisChanged)
+    Q_PROPERTY(QString verzeichnisPfad READ verzeichnisPfad NOTIFY verzeichnisChanged)
+    Q_PROPERTY(QString verzeichnisEltern READ verzeichnisEltern NOTIFY verzeichnisChanged)
 
 public:
     explicit Backend(const QString &binary, QObject *parent = 0);
@@ -65,6 +69,10 @@ public:
     QVariantList chats() const { return m_chats; }
     QVariantList nachrichten() const { return m_nachrichten; }
     QString offenerChat() const { return m_offenerChat; }
+    QVariantList mitglieder() const { return m_mitglieder; }
+    QVariantList verzeichnis() const { return m_verzeichnis; }
+    QString verzeichnisPfad() const { return m_verzeichnisPfad; }
+    QString verzeichnisEltern() const { return m_verzeichnisEltern; }
 
     Q_INVOKABLE void starten();
     Q_INVOKABLE void koppeln();
@@ -77,12 +85,27 @@ public:
     // Kennung. Beim WhatsApp-Port entschied die Laenge, und das ging
     // schief, sobald eine Kennung genau an der Grenze lag.
     Q_INVOKABLE bool istGruppe(const QString &jid) const;
+    // Die Mitglieder einer Gruppe. Der Dienst haelt sie bereit; hier wird
+    // nur abgeholt.
+    Q_INVOKABLE void gruppeLaden(const QString &jid);
+    // Einen Anhang aufs Geraet holen. Auf 2G nichts, was von selbst
+    // passieren sollte.
+    Q_INVOKABLE void medienLaden(const QString &jid, const QString &id);
+    Q_INVOKABLE void anhangSenden(const QString &jid, const QString &pfad,
+                                  const QString &beschriftung);
+    // Dateiwaehler: Harmattan bringt keinen mit, den eine fremde App
+    // aufrufen koennte, also listet der Dienst und die App zeigt.
+    Q_INVOKABLE void verzeichnisLesen(const QString &pfad);
+    Q_INVOKABLE void oeffnen(const QString &pfad);
+    Q_INVOKABLE QString groesse(const QVariant &bytes) const;
 
 signals:
     void statusChanged();
     void chatsChanged();
     void nachrichtenChanged();
     void fehlerChanged();
+    void gruppeChanged();
+    void verzeichnisChanged();
 
 private slots:
     void statusFertig();
@@ -91,6 +114,9 @@ private slots:
     void sendenFertig();
     void kopplungFertig();
     void ereignisFertig();
+    void gruppeFertig();
+    void verzeichnisFertig();
+    void befehlFertig();
     void abfragen();
 
 private:
@@ -119,6 +145,11 @@ private:
     QVariantList m_chats;
     QVariantList m_nachrichten;
     QString m_offenerChat;
+
+    QVariantList m_mitglieder;
+    QVariantList m_verzeichnis;
+    QString m_verzeichnisPfad;
+    QString m_verzeichnisEltern;
 };
 
 #endif

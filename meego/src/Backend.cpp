@@ -321,3 +321,111 @@ QString Backend::zeit(const QVariant &wert) const
         return t.toString(QLatin1String("ddd HH:mm"));
     return t.toString(QLatin1String("dd.MM. HH:mm"));
 }
+
+void Backend::gruppeLaden(const QString &jid)
+{
+    QUrl u = adresse(QLatin1String("/group/info"));
+    u.addQueryItem(QLatin1String("chat"), jid);
+    QNetworkReply *r = m_netz->get(QNetworkRequest(u));
+    connect(r, SIGNAL(finished()), this, SLOT(gruppeFertig()));
+}
+
+void Backend::gruppeFertig()
+{
+    QNetworkReply *r = qobject_cast<QNetworkReply *>(sender());
+    if (!r)
+        return;
+    r->deleteLater();
+    if (r->error() != QNetworkReply::NoError) {
+        setzeFehler(r->errorString());
+        return;
+    }
+    m_mitglieder = Json::parse(QString::fromUtf8(r->readAll())).toList();
+    emit gruppeChanged();
+}
+
+void Backend::medienLaden(const QString &jid, const QString &id)
+{
+    QUrl u = adresse(QLatin1String("/media/download"));
+    u.addQueryItem(QLatin1String("chat"), jid);
+    u.addQueryItem(QLatin1String("id"), id);
+    QNetworkReply *r = m_netz->get(QNetworkRequest(u));
+    connect(r, SIGNAL(finished()), this, SLOT(befehlFertig()));
+}
+
+void Backend::anhangSenden(const QString &jid, const QString &pfad,
+                           const QString &beschriftung)
+{
+    QUrl u = adresse(QLatin1String("/send/file"));
+    u.addQueryItem(QLatin1String("to"), jid);
+    u.addQueryItem(QLatin1String("path"), pfad);
+    if (!beschriftung.isEmpty())
+        u.addQueryItem(QLatin1String("caption"), beschriftung);
+    QNetworkReply *r = m_netz->get(QNetworkRequest(u));
+    connect(r, SIGNAL(finished()), this, SLOT(befehlFertig()));
+}
+
+// Gemeinsamer Abschluss fuer Befehle, die nur "angestossen" melden: der
+// Dienst arbeitet danach weiter, und das Ergebnis kommt ueber /events.
+void Backend::befehlFertig()
+{
+    QNetworkReply *r = qobject_cast<QNetworkReply *>(sender());
+    if (!r)
+        return;
+    r->deleteLater();
+    if (r->error() != QNetworkReply::NoError) {
+        const QString roh = QString::fromUtf8(r->readAll());
+        const QString grund = Json::parse(roh).toMap()
+                .value(QLatin1String("error")).toString();
+        setzeFehler(grund.isEmpty() ? r->errorString() : grund);
+        return;
+    }
+    setzeFehler(QString());
+}
+
+void Backend::verzeichnisLesen(const QString &pfad)
+{
+    QUrl u = adresse(QLatin1String("/files"));
+    if (!pfad.isEmpty())
+        u.addQueryItem(QLatin1String("path"), pfad);
+    QNetworkReply *r = m_netz->get(QNetworkRequest(u));
+    connect(r, SIGNAL(finished()), this, SLOT(verzeichnisFertig()));
+}
+
+void Backend::verzeichnisFertig()
+{
+    QNetworkReply *r = qobject_cast<QNetworkReply *>(sender());
+    if (!r)
+        return;
+    r->deleteLater();
+    if (r->error() != QNetworkReply::NoError) {
+        setzeFehler(r->errorString());
+        return;
+    }
+    const QVariantMap m = Json::parse(QString::fromUtf8(r->readAll())).toMap();
+    m_verzeichnisPfad = m.value(QLatin1String("path")).toString();
+    m_verzeichnisEltern = m.value(QLatin1String("parent")).toString();
+    m_verzeichnis = m.value(QLatin1String("entries")).toList();
+    emit verzeichnisChanged();
+}
+
+void Backend::oeffnen(const QString &pfad)
+{
+    // QDesktopServices scheiterte hier still. xdg-open reicht die Datei
+    // ueber libcontentaction an die zustaendige App weiter -- und braucht
+    // dafuer den Sitzungsbus, den main.cpp setzt.
+    QProcess::startDetached(QLatin1String("/usr/bin/xdg-open"),
+                            QStringList() << pfad);
+}
+
+QString Backend::groesse(const QVariant &bytes) const
+{
+    const qint64 b = bytes.toLongLong();
+    if (b <= 0)
+        return QString();
+    if (b < 1024)
+        return QString::number(b) + QLatin1String(" B");
+    if (b < 1024 * 1024)
+        return QString::number(b / 1024.0, 'f', 1) + QLatin1String(" kB");
+    return QString::number(b / (1024.0 * 1024.0), 'f', 1) + QLatin1String(" MB");
+}

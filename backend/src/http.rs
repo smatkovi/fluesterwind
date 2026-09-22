@@ -159,6 +159,52 @@ fn beantworten(
                 Err(_) => (500, r#"{"error":"Chats gesperrt"}"#.into()),
             }
         }
+        "/group/info" => {
+            let jid = parameter(abfrage, "chat");
+            match chats.lock() {
+                Ok(c) => (
+                    200,
+                    serde_json::to_string(&c.mitglieder(&jid)).unwrap_or("[]".into()),
+                ),
+                Err(_) => (500, r#"{"error":"Chats gesperrt"}"#.into()),
+            }
+        }
+        "/media/download" => {
+            let chat = parameter(abfrage, "chat");
+            let id = parameter(abfrage, "id");
+            if chat.is_empty() || id.is_empty() {
+                return (400, r#"{"error":"chat und id noetig"}"#.into());
+            }
+            // Die Antwort sagt nur, dass es angestossen ist. Der Anhang
+            // braucht auf 2G seine Zeit; der Pfad steht danach in
+            // /messages, und die Oberflaeche sieht ihn beim naechsten
+            // Ereignis.
+            if befehle.send(Befehl::MedienLaden { chat, id }).is_err() {
+                return (500, r#"{"error":"Signal-Seite antwortet nicht"}"#.into());
+            }
+            (200, r#"{"ok":true}"#.into())
+        }
+        "/send/file" => {
+            let an = parameter(abfrage, "to");
+            let pfad = parameter(abfrage, "path");
+            let beschriftung = parameter(abfrage, "caption");
+            if an.is_empty() || pfad.is_empty() {
+                return (400, r#"{"error":"to und path noetig"}"#.into());
+            }
+            if befehle
+                .send(Befehl::DateiSenden { an, pfad, beschriftung })
+                .is_err()
+            {
+                return (500, r#"{"error":"Signal-Seite antwortet nicht"}"#.into());
+            }
+            (200, r#"{"ok":true}"#.into())
+        }
+        "/files" => {
+            // Der Dateiwaehler der Oberflaeche. Harmattan bringt keinen
+            // mit, den eine fremde App aufrufen koennte.
+            let ordner = parameter(abfrage, "path");
+            (200, verzeichnis_lesen(&ordner))
+        }
         "/send" => {
             let an = parameter(abfrage, "to");
             let text = parameter(abfrage, "text");
@@ -223,4 +269,70 @@ fn qr_bild(text: &str) -> Option<Vec<u8>> {
                      ExtendedColorType::L8)
         .ok()?;
     Some(aus)
+}
+
+
+/// Listet ein Verzeichnis als JSON.
+///
+/// Auf VFAT kann ein Verzeichnis viele tausend Eintraege haben, und jedes
+/// stat kostet. Beim WhatsApp-Port fror das Geraet beim Oeffnen eines
+/// vollen Ordners ein -- deshalb hier eine Obergrenze.
+fn verzeichnis_lesen(pfad: &str) -> String {
+    use std::path::PathBuf;
+
+    const HOECHSTENS: usize = 400;
+
+    let p = if pfad.is_empty() {
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/user".into()))
+            .join("MyDocs")
+    } else {
+        PathBuf::from(pfad)
+    };
+
+    let Ok(eintraege) = std::fs::read_dir(&p) else {
+        return format!(
+            r#"{{"path":{},"entries":[],"error":"nicht lesbar"}}"#,
+            serde_json::to_string(&p.to_string_lossy()).unwrap_or("\"\"".into())
+        );
+    };
+
+    let mut liste: Vec<serde_json::Value> = Vec::new();
+    for e in eintraege.flatten() {
+        if liste.len() >= HOECHSTENS {
+            break;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        // Ein einziges stat je Eintrag -- der WhatsApp-Port fragte
+        // zweimal und brauchte doppelt so lange.
+        let Ok(meta) = e.metadata() else { continue };
+        liste.push(serde_json::json!({
+            "name": name,
+            "path": e.path().to_string_lossy(),
+            "isDir": meta.is_dir(),
+            "size": if meta.is_dir() { 0 } else { meta.len() },
+        }));
+    }
+    // Verzeichnisse zuerst, dann alphabetisch.
+    liste.sort_by(|a, b| {
+        let ad = a["isDir"].as_bool().unwrap_or(false);
+        let bd = b["isDir"].as_bool().unwrap_or(false);
+        bd.cmp(&ad).then_with(|| {
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+        })
+    });
+
+    let eltern = p.parent().map(|e| e.to_string_lossy().into_owned());
+    serde_json::json!({
+        "path": p.to_string_lossy(),
+        "parent": eltern,
+        "entries": liste,
+    })
+    .to_string()
 }

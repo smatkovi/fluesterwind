@@ -64,6 +64,17 @@ pub struct Chat {
     pub from_me: bool,
 }
 
+/// Ein Mitglied einer Gruppe.
+#[derive(Serialize, Clone)]
+pub struct Mitglied {
+    /// Die Chat-Kennung dieser Person -- damit laesst sich aus der
+    /// Mitgliederliste heraus ein Einzelchat oeffnen.
+    pub jid: String,
+    pub name: String,
+    #[serde(rename = "isAdmin")]
+    pub is_admin: bool,
+}
+
 #[derive(Serialize, Clone)]
 pub struct Nachricht {
     pub id: String,
@@ -107,6 +118,9 @@ pub struct Schnappschuss {
     /// Kennung -> Name, aus den Kontakten. In einer Gruppe steht sonst
     /// eine rohe UUID ueber der Nachricht statt eines Namens.
     namen: HashMap<String, String>,
+    /// Gruppenkennung -> Mitglieder. Beim Aufbau abgelegt, damit die
+    /// Abfrage aus der Oberflaeche nicht ueber den Signal-Faden muss.
+    mitglieder: HashMap<String, Vec<Mitglied>>,
     /// Zaehlt jede Aenderung. Die Oberflaeche haengt daran statt zu pollen
     /// -- dasselbe Verfahren wie beim WhatsApp-Backend.
     pub folge: u64,
@@ -171,6 +185,21 @@ impl Schnappschuss {
 
     pub fn namen_setzen(&mut self, namen: HashMap<String, String>) {
         self.namen = namen;
+    }
+
+    pub fn mitglieder_setzen(&mut self, jid: &str, liste: Vec<Mitglied>) {
+        self.mitglieder.insert(jid.to_string(), liste);
+    }
+
+    pub fn mitglieder(&self, jid: &str) -> Vec<Mitglied> {
+        let mut v = self.mitglieder.get(jid).cloned().unwrap_or_default();
+        // Erst die Verwalter, dann alphabetisch -- so findet man jemanden.
+        v.sort_by(|a, b| {
+            b.is_admin
+                .cmp(&a.is_admin)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        v
     }
 
     /// Der Anzeigename zu einer Kennung, oder die Kennung selbst.

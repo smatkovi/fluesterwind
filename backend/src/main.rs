@@ -55,6 +55,11 @@ const GERAETENAME: &str = "Fluesterwind (N9)";
 pub enum Befehl {
     Verknuepfen,
     Senden { an: String, text: String },
+    /// Einen Anhang aufs Geraet holen. Nicht von selbst beim Laden des
+    /// Verlaufs: auf 2G will man nicht jedes Bild eines Chats ungefragt
+    /// herunterladen.
+    MedienLaden { chat: String, id: String },
+    DateiSenden { an: String, pfad: String, beschriftung: String },
 }
 
 pub type GeteilteLage = Arc<Mutex<Lage>>;
@@ -151,8 +156,28 @@ fn main() {
                         eprintln!("Senden ohne Verknuepfung");
                         continue;
                     };
-                    if let Err(e) = senden(m, &an, &text, &chats).await {
+                    if let Err(e) = senden(m, &an, &text, None, &chats).await {
                         eprintln!("Senden gescheitert: {e}");
+                        if let Ok(mut l) = lage.lock() {
+                            l.fehler_setzen(e);
+                        }
+                    }
+                }
+                Befehl::MedienLaden { chat, id } => {
+                    let Some(m) = manager.as_mut() else { continue };
+                    if let Err(e) = medien_laden(m, &chat, &id, &chats).await {
+                        eprintln!("Anhang nicht geladen: {e}");
+                        if let Ok(mut l) = lage.lock() {
+                            l.fehler_setzen(e);
+                        }
+                    }
+                }
+                Befehl::DateiSenden { an, pfad, beschriftung } => {
+                    let Some(m) = manager.as_mut() else { continue };
+                    if let Err(e) =
+                        datei_senden(m, &an, &pfad, &beschriftung, &chats).await
+                    {
+                        eprintln!("Datei nicht verschickt: {e}");
                         if let Ok(mut l) = lage.lock() {
                             l.fehler_setzen(e);
                         }
@@ -355,6 +380,7 @@ async fn senden(
     manager: &mut Manager<SqliteStore, Registered>,
     an: &str,
     text: &str,
+    anhang: Option<presage::libsignal_service::proto::AttachmentPointer>,
     chats: &GeteilteChats,
 ) -> Result<(), String> {
     use presage::libsignal_service::content::ContentBody;
@@ -366,9 +392,13 @@ async fn senden(
         .map_err(|e| e.to_string())?
         .as_millis() as u64;
 
+    let anhaenge = anhang.clone().map(|a| vec![a]).unwrap_or_default();
     let nachricht = DataMessage {
-        body: Some(text.to_string()),
+        // Ein Anhang ohne Begleittext ist der Normalfall -- dann bleibt
+        // body leer statt eine leere Zeichenkette zu schicken.
+        body: if text.is_empty() { None } else { Some(text.to_string()) },
         timestamp: Some(zeit),
+        attachments: anhaenge,
         ..Default::default()
     };
 
@@ -394,17 +424,21 @@ async fn senden(
     // WhatsApp-Port der erste Fehlerbericht.
     if let Ok(mut s) = chats.lock() {
         let eigene = manager.registration_data().service_ids.aci.to_string();
-        s.eintragen(
-            chats::Nachricht::text(
-                zeit.to_string(),
-                an.to_string(),
-                eigene,
-                text.to_string(),
-                true,
-                zeit / 1000,
-            ),
-            "",
+        let mut n = chats::Nachricht::text(
+            zeit.to_string(),
+            an.to_string(),
+            eigene,
+            text.to_string(),
+            true,
+            zeit / 1000,
         );
+        if let Some(a) = &anhang {
+            let (mime, name, groesse) = medien::beschreibung(a);
+            n.media_type = medien::art(&mime).to_string();
+            n.file_name = name;
+            n.size = groesse;
+        }
+        s.eintragen(n, "");
     }
     Ok(())
 }
@@ -441,11 +475,39 @@ async fn schnappschuss_fuellen(
         Err(e) => eprintln!("Kontakte nicht lesbar: {e}"),
     }
     if let Ok(mut s) = chats.lock() {
-        s.namen_setzen(namen);
+        s.namen_setzen(namen.clone());
     }
     match manager.store().groups().await {
         Ok(liste) => {
             for (schluessel, g) in liste.flatten() {
+                let jid = chats::kennung_gruppe(&schluessel);
+                // Die Mitglieder gleich mit ablegen: die Gruppendaten
+                // liegen ohnehin gerade offen, und die Oberflaeche kommt
+                // an den Signal-Faden nicht heran.
+                let mitglieder: Vec<chats::Mitglied> = g
+                    .members
+                    .iter()
+                    .map(|m| {
+                        let kennung = ServiceId::from(m.aci).service_id_string();
+                        chats::Mitglied {
+                            name: namen
+                                .get(&kennung)
+                                .cloned()
+                                .unwrap_or_else(|| kennung.clone()),
+                            jid: chats::kennung_person(&kennung),
+                            // Role kommt aus groups_v2, nicht aus den
+                            // Protobuf-Definitionen -- gleiche Namen,
+                            // andere Herkunft.
+                            is_admin: matches!(
+                                m.role,
+                                presage::libsignal_service::groups_v2::Role::Administrator
+                            ),
+                        }
+                    })
+                    .collect();
+                if let Ok(mut c) = chats.lock() {
+                    c.mitglieder_setzen(&jid, mitglieder);
+                }
                 faeden.push((Thread::Group(schluessel), g.title));
             }
         }
@@ -541,4 +603,119 @@ fn nachricht_aus(
         size: groesse,
         local_path: String::new(),
     })
+}
+
+/// Der Thread zu einer Chat-Kennung.
+fn thread_aus(jid: &str) -> Option<presage::store::Thread> {
+    use presage::libsignal_service::protocol::ServiceId;
+    use presage::store::Thread;
+
+    if let Some(hex) = jid.strip_prefix("g:") {
+        let bytes = chats::gruppenschluessel(&format!("g:{hex}"))?;
+        let feld: [u8; 32] = bytes.try_into().ok()?;
+        return Some(Thread::Group(feld));
+    }
+    let roh = jid.strip_prefix("c:").unwrap_or(jid);
+    Some(Thread::Contact(ServiceId::parse_from_service_id_string(roh)?))
+}
+
+/// Holt den Anhang einer Nachricht aufs Geraet.
+///
+/// Der Anhang wird nicht zwischengespeichert: die Nachricht liegt samt
+/// ihrem Zeiger im Speicher, und der Zeitstempel ist bei Signal zugleich
+/// ihre Kennung. Also nachschlagen statt mitschleppen.
+async fn medien_laden(
+    manager: &mut Manager<SqliteStore, Registered>,
+    chat: &str,
+    id: &str,
+    chats: &GeteilteChats,
+) -> Result<(), String> {
+    use presage::libsignal_service::content::ContentBody;
+    use presage::libsignal_service::proto::sync_message::Content as SyncContent;
+    use presage::store::ContentsStore;
+
+    let thread = thread_aus(chat).ok_or_else(|| format!("Kennung unlesbar: {chat}"))?;
+    let zeit: u64 = id.parse().map_err(|_| format!("Kennung unlesbar: {id}"))?;
+
+    let inhalt = manager
+        .store()
+        .message(&thread, zeit)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Nachricht nicht im Speicher".to_string())?;
+
+    let daten = match &inhalt.body {
+        ContentBody::DataMessage(d) => d,
+        ContentBody::SynchronizeMessage(s) => match &s.content {
+            Some(SyncContent::Sent(sent)) => sent
+                .message
+                .as_ref()
+                .ok_or_else(|| "keine Nachricht darin".to_string())?,
+            _ => return Err("kein Anhang".into()),
+        },
+        _ => return Err("kein Anhang".into()),
+    };
+    let zeiger = daten
+        .attachments
+        .first()
+        .ok_or_else(|| "kein Anhang".to_string())?;
+
+    let (mime, name, _) = medien::beschreibung(zeiger);
+    println!("📎 hole Anhang ({mime}) aus {chat}");
+    let roh = manager
+        .get_attachment(zeiger)
+        .await
+        .map_err(|e| e.to_string())?;
+    let pfad = medien::ablegen(&roh, &mime, &name, zeit)?;
+    println!("📎 abgelegt: {}", pfad.display());
+
+    if let Ok(mut s) = chats.lock() {
+        s.pfad_setzen(chat, id, &pfad.to_string_lossy());
+    }
+    Ok(())
+}
+
+/// Verschickt eine Datei als Anhang.
+async fn datei_senden(
+    manager: &mut Manager<SqliteStore, Registered>,
+    an: &str,
+    pfad: &str,
+    beschriftung: &str,
+    chats: &GeteilteChats,
+) -> Result<(), String> {
+    use presage::libsignal_service::sender::AttachmentSpec;
+
+    let p = std::path::Path::new(pfad);
+    let roh = std::fs::read(p).map_err(|e| format!("{pfad}: {e}"))?;
+    let mime = medien::mime_aus_pfad(p);
+    let name = p
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "datei".into());
+
+    let spec = AttachmentSpec {
+        content_type: mime.clone(),
+        length: roh.len(),
+        file_name: Some(name.clone()),
+        preview: None,
+        voice_note: None,
+        borderless: None,
+        width: None,
+        height: None,
+        caption: if beschriftung.is_empty() {
+            None
+        } else {
+            Some(beschriftung.to_string())
+        },
+        blur_hash: None,
+    };
+
+    println!("📎 lade hoch: {name} ({} B, {mime})", roh.len());
+    let zeiger = manager
+        .upload_attachment(spec, roh)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+    senden(manager, an, beschriftung, Some(zeiger), chats).await
 }
