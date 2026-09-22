@@ -1,0 +1,23 @@
+Package: fluesterwind
+Version: @VERSION@
+Section: user/network
+Priority: optional
+Architecture: armel
+Depends: libqt4-declarative, libqt4-script, libqt4-gui, libqt4-network, qt-components
+Maintainer: Sebastian Matkovich <sebastian.matkovich@gmail.com>
+Description: Signal fuer das N9 und N950
+ Meldet sich als Zweitgeraet an einem Signal-Konto an. Das Protokoll
+ spricht ein Dienst in Rust, gebaut auf presage und libsignal-service --
+ denselben Bibliotheken, auf denen Whisperfish fuer Sailfish aufsetzt.
+ Statisch gegen musl gebunden, damit die glibc 2.10 dieses Geraets keine
+ Rolle spielt.
+ .
+ Die Oberflaeche ist fuer Harmattan geschrieben: Chatliste, Verlauf,
+ Senden. Verknuepft wird ueber einen QR-Code, den das Geraet selbst malt
+ und den das Hauptgeraet abscannt.
+ .
+ Signal uebertraegt an ein neu verknuepftes Geraet keinen alten Verlauf.
+ Sichtbar wird, was ab dem Verknuepfen eintrifft.
+Maemo-Display-Name: Fluesterwind
+XB-Maemo-Icon-26:
+@ICON@

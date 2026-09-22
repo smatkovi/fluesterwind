@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Fluesterwind
+Comment=Signal
+# Kein invoker: dessen Booster will ein Binary, das sich als Bibliothek
+# laden laesst ("cannot dynamically load executable"). Direkt starten
+# kostet nur etwas Startzeit.
+Exec=/opt/fluesterwind/bin/fluesterwind
+# Voller Pfad, nicht der Themenname: mit "Icon=fluesterwind" fand der
+# Starter nichts und malte ein rotes Ersatzquadrat. X-Window-Icon bleibt
+# leer -- so macht es auch der WhatsApp-Port, und dort stimmt das Symbol.
+Icon=/usr/share/icons/hicolor/80x80/apps/fluesterwind.png
+X-Window-Icon=
+X-HildonDesk-ShowInToolbar=true
+X-Osso-Type=application/x-executable
