@@ -157,9 +157,38 @@ fn main() {
 /// Uebernimmt einen angemeldeten Manager in den Zustand.
 async fn uebernehmen(manager: &mut Manager<SqliteStore, Registered>, lage: &GeteilteLage) {
     let nummer = manager.whoami().await.ok().map(|w| w.number.to_string());
+    let eigenes: u32 = manager.device_id().into();
+
+    // Was der Server fuehrt, nicht was wir glauben. Steht das eigene
+    // Geraet nicht in dieser Liste, ist die Verknuepfung nicht zustande
+    // gekommen -- egal wie zuversichtlich der eigene Zustand klingt.
+    let liste = match manager.devices().await {
+        Ok(g) => g
+            .into_iter()
+            .map(|d| {
+                let id: u32 = d.id.into();
+                format!(
+                    "{}: {} (seit {})",
+                    id,
+                    d.name.unwrap_or_else(|| "ohne Namen".into()),
+                    d.created_at.format("%d.%m. %H:%M")
+                )
+            })
+            .collect(),
+        Err(e) => {
+            eprintln!("Geraeteliste nicht abrufbar: {e}");
+            Vec::new()
+        }
+    };
+    println!("📱 eigenes Geraet {eigenes}, {} am Konto", liste.len());
+    for g in &liste {
+        println!("   {g}");
+    }
+
     if let Ok(mut l) = lage.lock() {
         l.verknuepft(nummer);
         l.verbunden_setzen(true);
+        l.geraete_setzen(eigenes, liste);
     }
 }
 

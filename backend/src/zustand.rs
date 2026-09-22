@@ -16,6 +16,13 @@ pub struct Lage {
     #[serde(rename = "lastError")]
     pub last_error: String,
     pub state: String,
+    /// Die Geraete, die der Server zu diesem Konto fuehrt -- die
+    /// massgebliche Auskunft darueber, ob eine Verknuepfung wirklich
+    /// angekommen ist. Was der eigene Zustand sagt, ist nur die halbe
+    /// Wahrheit.
+    #[serde(rename = "deviceId")]
+    pub device_id: u32,
+    pub devices: Vec<String>,
 }
 
 impl Lage {
@@ -27,6 +34,8 @@ impl Lage {
             phone: String::new(),
             last_error: String::new(),
             state: "idle".into(),
+            device_id: 0,
+            devices: Vec::new(),
         }
     }
 
@@ -56,6 +65,11 @@ impl Lage {
         if an {
             self.state = "connected".into();
         }
+    }
+
+    pub fn geraete_setzen(&mut self, eigenes: u32, liste: Vec<String>) {
+        self.device_id = eigenes;
+        self.devices = liste;
     }
 
     pub fn fehler_setzen(&mut self, text: String) {
