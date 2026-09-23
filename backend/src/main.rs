@@ -442,6 +442,8 @@ async fn senden(
     use presage::libsignal_service::content::ContentBody;
     use presage::libsignal_service::proto::DataMessage;
     use presage::libsignal_service::protocol::ServiceId;
+    // Fuer store().group() -- die Umlaufzahl der Gruppe.
+    use presage::store::ContentsStore;
 
     let zeit = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -449,7 +451,7 @@ async fn senden(
         .as_millis() as u64;
 
     let anhaenge = anhang.clone().map(|a| vec![a]).unwrap_or_default();
-    let nachricht = DataMessage {
+    let mut nachricht = DataMessage {
         // Ein Anhang ohne Begleittext ist der Normalfall -- dann bleibt
         // body leer statt eine leere Zeichenkette zu schicken.
         body: if text.is_empty() { None } else { Some(text.to_string()) },
@@ -461,8 +463,39 @@ async fn senden(
     if chats::ist_gruppe(an) {
         let schluessel = chats::gruppenschluessel(an)
             .ok_or_else(|| "Gruppenkennung unlesbar".to_string())?;
-        println!("➡ an Gruppe {} ({} Byte Schluessel)", &an[..14.min(an.len())],
-                 schluessel.len());
+        let schluessel32: [u8; 32] = schluessel
+            .clone()
+            .try_into()
+            .map_err(|_| "Gruppenschluessel hat nicht 32 Byte".to_string())?;
+
+        // Ohne diesen Zusatz wird aus der Gruppennachricht bei jedem
+        // Empfaenger eine Direktnachricht.
+        //
+        // Signal kennt keinen Server, der eine Gruppe verteilt: der
+        // Absender schickt dieselbe Nachricht an jedes Mitglied einzeln,
+        // und presage tut in send_message_to_group genau das. Woran das
+        // Mitglied erkennt, dass es eine Gruppennachricht ist, ist allein
+        // der GroupContextV2 in der Nachricht selbst. Den setzt presage
+        // nicht; das ist Sache des Aufrufers.
+        //
+        // Die Umlaufzahl gehoert dazu: an ihr sieht der Empfaenger, ob
+        // sein Stand der Gruppe alt ist. Kennen wir die Gruppe noch
+        // nicht, bleibt sie leer -- das ist immer noch eine
+        // Gruppennachricht, nur ohne Hinweis auf den Stand.
+        let umlauf = manager
+            .store()
+            .group(schluessel32)
+            .await
+            .ok()
+            .flatten()
+            .map(|g| g.revision);
+        nachricht.group_v2 = Some(presage::libsignal_service::proto::GroupContextV2 {
+            master_key: Some(schluessel.clone()),
+            revision: umlauf,
+            group_change: None,
+        });
+
+        println!("➡ an Gruppe {} (Umlauf {:?})", &an[..14.min(an.len())], umlauf);
         manager
             .send_message_to_group(&schluessel, ContentBody::DataMessage(nachricht), zeit)
             .await
