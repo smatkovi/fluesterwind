@@ -62,6 +62,49 @@ pub fn starten(
             }
             let abfrage = anfrage.url().split_once('?').map(|(_, q)| q.to_string())
                 .unwrap_or_default();
+
+            // Die lange Abfrage bekommt einen eigenen Faden.
+            //
+            // tiny_http bedient hier der Reihe nach; wartete /events auf
+            // diesem Faden, stuende alles andere still. Ohne Warten aber
+            // antwortet es nach zehn Millisekunden, und wer in einer
+            // Schleife fragt -- die Nachrichtenbruecke tut das --, dreht
+            // mit voller Rechenzeit. Gemessen: ein Fuenftel der CPU auf
+            // beiden Seiten, dauerhaft.
+            if pfad == "/events" {
+                let chats = chats.clone();
+                std::thread::spawn(move || {
+                    let seit: u64 = abfrage
+                        .split('&')
+                        .find_map(|t| t.strip_prefix("since="))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    // Bis zu 25 s warten, in Vierteln einer Sekunde. Ein
+                    // Weckruf von der Signal-Seite waere schoener, aber
+                    // die liegt hinter der Fadengrenze; vier Blicke in
+                    // der Sekunde auf eine Zahl kosten nichts.
+                    let mut folge = seit;
+                    for _ in 0..100 {
+                        folge = chats.lock().map(|c| c.folge).unwrap_or(seit);
+                        if folge != seit {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    let antwort =
+                        tiny_http::Response::from_string(format!(r#"{{"seq":{folge}}}"#))
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Content-Type"[..],
+                                    &b"application/json"[..],
+                                )
+                                .unwrap(),
+                            );
+                    let _ = anfrage.respond(antwort);
+                });
+                continue;
+            }
+
             let (code, koerper) = beantworten(&pfad, &abfrage, &lage, &chats, &befehle);
             let antwort = tiny_http::Response::from_string(koerper)
                 .with_header(
@@ -147,13 +190,10 @@ fn beantworten(
             }
         }
         "/events" => {
-            // Die Oberflaeche fragt mit der zuletzt gesehenen Nummer und
-            // bekommt die aktuelle zurueck. Anders als beim
-            // WhatsApp-Backend wird hier nicht gewartet, sondern sofort
-            // geantwortet: eine lange Abfrage braucht einen Weckruf von
-            // der Signal-Seite, und die liegt hinter der Fadengrenze.
-            // Fuer den Anfang genuegt das -- die Oberflaeche fragt ohnehin
-            // im Takt.
+            // Wird nicht mehr von hier aus beantwortet: die lange Abfrage
+            // laeuft auf einem eigenen Faden, siehe starten(). Der Zweig
+            // bleibt als Rueckfall, falls doch einmal jemand hier
+            // hereinkommt.
             match chats.lock() {
                 Ok(c) => (200, format!(r#"{{"seq":{}}}"#, c.folge)),
                 Err(_) => (500, r#"{"error":"Chats gesperrt"}"#.into()),
