@@ -55,14 +55,18 @@ allein als Cross-Compiler nicht genügt.
 
 ## Stand
 
-Frühe Arbeit. Belegt ist bisher:
+Läuft auf N9 und N950, Fassung 1.3. Gekoppelt, verbunden, 97 Chats.
 
-* Rust baut für dieses Gerät ein statisches Binary, und es läuft. Eine
-  Probe mit Fäden, Dateisystem, Uhr und TCP ging auf Kernel 2.6.32.54
-  vollständig durch — einschließlich der Netzwerkstrecke, an der das
-  Go-Backend des WhatsApp-Ports seinerzeit scheiterte.
-* Der vollständige Signal-Unterbau (presage, libsignal-service, rustls,
-  SQLite) übersetzt für armel und legt auf dem Gerät eine Datenbank an.
+* Oberfläche (Qt 4.7 / QML 1): Chatliste, Verlauf, Senden, Anhänge,
+  Gruppen mit Mitgliedsnamen, Reaktionen, Antwortbezüge, Profilbilder.
+* Kopplung per QR-Code unter `/pair/qr`, Abmelden über `/logout`.
+* Anbindung an die Nachrichten-App über die Brücke: das Konto
+  `bruecke/signal/signal0` spricht HTTP auf `127.0.0.1:8095`.
 
-Was noch nicht existiert: der Dienst selbst, die Oberfläche, alles
-Weitere.
+**Der Dienst ersetzt seit 26.09.2026 `/opt/pysignal/signal_daemon.py`.**
+Der lag daneben noch im Speicher (3,8 MB, Elternprozess init) und hörte
+auf gar nichts mehr — Port 8095 gehörte längst hier her. Die
+Python-Vorlage liegt zum Nachschlagen unter `alt/pysignal/`.
+
+Offen: der Gerätename beim Koppeln ist fest „Fluesterwind (N9)", auch
+auf dem N950 — in der Geräteliste von Signal sehen beide gleich aus.
